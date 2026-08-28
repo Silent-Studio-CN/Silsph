@@ -62,9 +62,28 @@ static void lit_color(const float n[3], const float c[3], float angle, float out
     out[0] = c[0]*light; out[1] = c[1]*light; out[2] = c[2]*light;
 }
 
-/* 场景：Qraft 主题立方体 + 16x16 网格 + 轨道相机（与 GL demo 同参数）
+/* 棋盘格纹理（Qraft 青/深底，8px 格）：懒初始化 */
+static int g_tex_checker = 0;
+static void init_checker_texture(void) {
+    const int W = 64, H = 64;
+    unsigned char* px = (unsigned char*)malloc((size_t)W * H * 4);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            int c = ((x / 16) + (y / 16)) & 1;
+            unsigned char* p = px + ((size_t)y * W + x) * 4;
+            if (c) { p[0]=255; p[1]=255; p[2]=255; }  /* 白格：显示光照本色 */
+            else   { p[0]=16;  p[1]=19;  p[2]=26; }    /* 深格 #10131A */
+            p[3] = 255;
+        }
+    g_tex_checker = sp_gen_texture(W, H, px);
+    free(px);
+}
+
+/* 场景：Qraft 主题立方体(棋盘格纹理) + 16x16 网格 + 轨道相机（与 GL demo 同参数）
    angle 递增 → 立方体自转(绕Y + 绕X摆动) + 相机绕圈（"元素转圈"） */
 static void draw_scene(int W, int H, float angle) {
+    if (!g_tex_checker) init_checker_texture();
+    sp_bind_texture(g_tex_checker);
     float aspect = (float)W / (float)H;
     sp_matrix_mode(SP_PROJECTION); sp_load_identity();
     sp_perspective(55.0f, aspect, 0.1f, 100.0f);
@@ -86,18 +105,25 @@ static void draw_scene(int W, int H, float angle) {
         float ty[3] = { n[1]*tx[2]-n[2]*tx[1], n[2]*tx[0]-n[0]*tx[2], n[0]*tx[1]-n[1]*tx[0] };
         float col[3]; lit_color(n, c, angle, col);
         sp_color3f(col[0], col[1], col[2]);
-        float v[4][3];
+        float v[4][3]; float uv[4][2];
         for (int k = 0; k < 4; k++) {
             float sx = (k==1||k==2) ? 1 : -1, sy = (k==2||k==3) ? 1 : -1;
             v[k][0] = n[0]+tx[0]*sx+ty[0]*sy;
             v[k][1] = n[1]+tx[1]*sx+ty[1]*sy;
             v[k][2] = n[2]+tx[2]*sx+ty[2]*sy;
+            uv[k][0] = (k==1||k==2) ? 1.0f : 0.0f;
+            uv[k][1] = (k==2||k==3) ? 1.0f : 0.0f;
         }
         sp_begin(SP_TRIANGLES);
-        sp_vertex3f(v[0][0],v[0][1],v[0][2]); sp_vertex3f(v[2][0],v[2][1],v[2][2]); sp_vertex3f(v[1][0],v[1][1],v[1][2]);
-        sp_vertex3f(v[0][0],v[0][1],v[0][2]); sp_vertex3f(v[3][0],v[3][1],v[3][2]); sp_vertex3f(v[2][0],v[2][1],v[2][2]);
+        sp_texcoord2f(uv[0][0],uv[0][1]); sp_vertex3f(v[0][0],v[0][1],v[0][2]);
+        sp_texcoord2f(uv[2][0],uv[2][1]); sp_vertex3f(v[2][0],v[2][1],v[2][2]);
+        sp_texcoord2f(uv[1][0],uv[1][1]); sp_vertex3f(v[1][0],v[1][1],v[1][2]);
+        sp_texcoord2f(uv[0][0],uv[0][1]); sp_vertex3f(v[0][0],v[0][1],v[0][2]);
+        sp_texcoord2f(uv[3][0],uv[3][1]); sp_vertex3f(v[3][0],v[3][1],v[3][2]);
+        sp_texcoord2f(uv[2][0],uv[2][1]); sp_vertex3f(v[2][0],v[2][1],v[2][2]);
         sp_end();
     }
+    sp_bind_texture(0);   /* 网格线纯色 */
     sp_color3f(0.35f, 0.40f, 0.55f);
     sp_begin(SP_LINES);
     for (float x = -8.0f; x <= 8.0f; x += 1.0f) { sp_vertex3f(x,0,-8); sp_vertex3f(x,0,8); }

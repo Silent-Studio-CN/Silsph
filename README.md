@@ -21,6 +21,7 @@
 
 ### Silsph Soft Renderer（纯 C 软件渲染管线）
 - **完整管线**：MVP 变换 → 近平面裁剪（Sutherland-Hodgman）→ 背面剔除 → edge-function 光栅化 → 透视校正插值（颜色/深度）→ 深度测试（LESS）→ RGBA8 帧缓冲
+- **纹理系统**：RGBA8 2D 纹理（`sp_gen_texture`/`sp_bind_texture`/`sp_texcoord2f`），最近邻/双线性过滤、repeat/clamp 环绕、透视校正 UV 插值、纹素色 × 光照（GL 语义 frag = texel × light）
 - **画质控制**：深度测试 / 背面剔除开关（`sp_depth_test` / `sp_cull_face`）
 - **帧率控制**：限速器实测 60→59.5 FPS、30→29.7 FPS（`sp_sleep_ms`）
 - **硬件信息**：CPU 品牌/核心/主频、内存、GPU 名称/显存、OS 版本（`sp_get_sysinfo`，纯系统 API）
@@ -90,10 +91,12 @@ sh soft/build.sh        # 产物 libsilsph_soft.so / .dylib + demo_soft
 
 ## 路线图
 
+三档完整规划见 [ROADMAP.md](ROADMAP.md)：编辑器可用（最急）→ 真游戏引擎 → 生产级成熟。
+
 - [x] 渲染管线核心（光栅化/深度/透视校正/背面剔除/线段）
 - [x] 近平面裁剪（Sutherland-Hodgman，clip 空间 z+w>=0）
 - [x] 画质/帧率控制、硬件信息（三平台）、跨平台构建
-- [ ] x/y/far 视锥裁剪、纹理采样、混合、错误码体系
+- [ ] **纹理系统**（进行中）→ 混合/透明 → 视锥裁剪 → 场景图 → 资源加载 → 拾取/Gizmo → 离屏渲染 → FFI 绑定
 - [ ] SIMD 向量化 + 多线程分块光栅化
 - [ ] 数学库 Rust 化
 - [ ] GPU 后端抽象（VK 优先，软渲染兜底——"统一 API + 多后端"）

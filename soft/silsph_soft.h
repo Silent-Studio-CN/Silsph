@@ -50,6 +50,20 @@ SP_API void sp_look_at(float ex, float ey, float ez,
                        float ux, float uy, float uz);
 SP_API void sp_rotate(float deg, float ax, float ay, float az); // 当前矩阵 *= 旋转
 
+/* ---- 纹理 ---- */
+#define SP_TEX_NEAREST 0
+#define SP_TEX_LINEAR  1
+#define SP_TEX_REPEAT  0
+#define SP_TEX_CLAMP   1
+#define SP_MAX_TEX     16
+
+SP_API int  sp_gen_texture(int w, int h, const unsigned char* rgba); /* 返回纹理 ID(1..16)，失败 0 */
+SP_API void sp_delete_texture(int tex);
+SP_API void sp_bind_texture(int tex);     /* 0 = 关闭纹理（纯色） */
+SP_API void sp_texcoord2f(float u, float v);
+SP_API void sp_tex_filter(int mode);      /* SP_TEX_NEAREST / SP_TEX_LINEAR */
+SP_API void sp_tex_wrap(int mode);        /* SP_TEX_REPEAT / SP_TEX_CLAMP */
+
 /* ---- 画质控制 ---- */
 SP_API void sp_cull_face(int enable);   /* 背面剔除（默认开，1=开） */
 SP_API void sp_depth_test(int enable);  /* 深度测试与写入（默认开，1=开） */

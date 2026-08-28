@@ -111,17 +111,24 @@ static struct {
     int      cull_enable;    /* 背面剔除开关 */
     int      depth_enable;   /* 深度测试开关 */
     float    cur_r, cur_g, cur_b;
-    struct Vtx { float x, y, z; float r, g, b; } verts[MAX_VERTS];
+    float    cur_u, cur_v;   /* 当前纹理坐标 */
+    int      cur_tex;        /* 当前纹理 ID（0 = 无纹理） */
+    struct Vtx { float x, y, z; float r, g, b; float u, v; } verts[MAX_VERTS];
 } S;
 
+/* ---- 纹理存储 ---- */
+typedef struct { int w, h; unsigned char* rgba; int filter, wrap; } Tex;
+static Tex texs[SP_MAX_TEX];
+
 /* clip 空间顶点（透视除法前）：用于近平面裁剪，属性与几何同步插值 */
-typedef struct { float x, y, z, w; float r, g, b; } ClipV;
-/* 屏幕坐标顶点：y 向上（与 GL 窗口坐标一致）+ clip z/w + 颜色 */
-typedef struct { float sx, sy; float zc, wc; float r, g, b; } Pv;
+typedef struct { float x, y, z, w; float r, g, b; float u, v; } ClipV;
+/* 屏幕坐标顶点：y 向上（与 GL 窗口坐标一致）+ clip z/w + 颜色 + UV */
+typedef struct { float sx, sy; float zc, wc; float r, g, b; float u, v; } Pv;
 
 static void xform_vertex(const struct Vtx* v, ClipV* o) {
     m4_transform(&S.mvp, v->x, v->y, v->z, 1.0f, &o->x, &o->y, &o->z, &o->w);
     o->r = v->r; o->g = v->g; o->b = v->b;
+    o->u = v->u; o->v = v->v;
 }
 
 /* clip 空间 -> 屏幕坐标（透视除法 + 视口变换） */
@@ -132,6 +139,7 @@ static void to_screen(const ClipV* c, Pv* o) {
     o->sy = (ny * 0.5f + 0.5f) * (float)S.vp_h + (float)S.vp_y;
     o->zc = c->z; o->wc = c->w;
     o->r = c->r; o->g = c->g; o->b = c->b;
+    o->u = c->u; o->v = c->v;
 }
 
 /* Sutherland-Hodgman：对近平面裁剪（clip 空间 f(p) = p.z + p.w >= 0，即视空间 z >= -near）。
@@ -147,6 +155,8 @@ static ClipV lerp_v(const ClipV* a, const ClipV* b, float t) {
     o.r = a->r + (b->r - a->r) * t;
     o.g = a->g + (b->g - a->g) * t;
     o.b = a->b + (b->b - a->b) * t;
+    o.u = a->u + (b->u - a->u) * t;
+    o.v = a->v + (b->v - a->v) * t;
     return o;
 }
 static void clip_near(const ClipV in[3], ClipV out[6], int* nout) {
@@ -184,6 +194,10 @@ static void put_pixel(int x, int y_up, float zndc, float r, float g, float b) {
     S.color[row * S.width + x] = 0xFF000000u | (ri << 16) | (gi << 8) | bi;
 }
 
+static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
+                       float b0, float b1, float b2, float iw,
+                       float* r, float* g, float* bb);
+
 /* ================= 光栅化：三角形（edge function + 重心坐标 + 透视校正） ================= */
 static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
     /* 背面剔除：GL 窗口坐标（y 向上）CCW 为正面；signed area > 0 即 CCW，剔除其余（对应 CULL_BACK） */
@@ -214,11 +228,63 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
             if (denom <= 0.0f) continue;
             float zndc = (b0 * a->zc + b1 * b->zc + b2 * c->zc) / denom;
             float iw = b0 / a->wc + b1 / b->wc + b2 / c->wc;
-            float r = (b0 * a->r / a->wc + b1 * b->r / b->wc + b2 * c->r / c->wc) / iw;
-            float g = (b0 * a->g / a->wc + b1 * b->g / b->wc + b2 * c->g / c->wc) / iw;
-            float bb = (b0 * a->b / a->wc + b1 * b->b / b->wc + b2 * c->b / c->wc) / iw;
+            float r, g, bb;
+            if (S.cur_tex > 0 && S.cur_tex <= SP_MAX_TEX && texs[S.cur_tex-1].rgba) {
+                sample_tex(a, b, c, b0, b1, b2, iw, &r, &g, &bb);
+            } else {
+                r = (b0 * a->r / a->wc + b1 * b->r / b->wc + b2 * c->r / c->wc) / iw;
+                g = (b0 * a->g / a->wc + b1 * b->g / b->wc + b2 * c->g / c->wc) / iw;
+                bb = (b0 * a->b / a->wc + b1 * b->b / b->wc + b2 * c->b / c->wc) / iw;
+            }
             put_pixel(x, y, zndc, r, g, bb);
         }
+    }
+}
+
+/* ================= 纹理采样 ================= */
+static void texel_rgba(const Tex* t, int x, int y, float out[4]) {
+    if (t->wrap == SP_TEX_REPEAT) {
+        x %= t->w; if (x < 0) x += t->w;
+        y %= t->h; if (y < 0) y += t->h;
+    } else {
+        if (x < 0) x = 0; else if (x >= t->w) x = t->w - 1;
+        if (y < 0) y = 0; else if (y >= t->h) y = t->h - 1;
+    }
+    const unsigned char* p = t->rgba + ((size_t)y * t->w + x) * 4;
+    out[0] = p[0] / 255.0f; out[1] = p[1] / 255.0f;
+    out[2] = p[2] / 255.0f; out[3] = p[3] / 255.0f;
+}
+/* 透视校正插值 UV 并采样；输出 = 纹素色 × 顶点光照色（GL 语义 frag = texel * light） */
+static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
+                       float b0, float b1, float b2, float iw,
+                       float* r, float* g, float* bb) {
+    float u = (b0*a->u/a->wc + b1*b->u/b->wc + b2*c->u/c->wc) / iw;
+    float v = (b0*a->v/a->wc + b1*b->v/b->wc + b2*c->v/c->wc) / iw;
+    float vr = (b0*a->r/a->wc + b1*b->r/b->wc + b2*c->r/c->wc) / iw;  /* 顶点光照色 */
+    float vg = (b0*a->g/a->wc + b1*b->g/b->wc + b2*c->g/c->wc) / iw;
+    float vb = (b0*a->b/a->wc + b1*b->b/b->wc + b2*c->b/c->wc) / iw;
+    const Tex* t = &texs[S.cur_tex - 1];
+    if (t->wrap == SP_TEX_REPEAT) { u -= floorf(u); v -= floorf(v); }
+    else { if (u < 0) u = 0; else if (u > 1) u = 1; if (v < 0) v = 0; else if (v > 1) v = 1; }
+    float fx = u * (float)t->w - 0.5f;
+    float fy = v * (float)t->h - 0.5f;
+    if (t->filter == SP_TEX_LINEAR) {
+        int x0 = (int)floorf(fx), y0 = (int)floorf(fy);
+        float tx = fx - x0, ty = fy - y0;
+        float c00[4], c10[4], c01[4], c11[4];
+        texel_rgba(t, x0,   y0,   c00);
+        texel_rgba(t, x0+1, y0,   c10);
+        texel_rgba(t, x0,   y0+1, c01);
+        texel_rgba(t, x0+1, y0+1, c11);
+        float tr = c00[0]*(1-tx) + c10[0]*tx, tg = c00[1]*(1-tx) + c10[1]*tx, tb = c00[2]*(1-tx) + c10[2]*tx;
+        float br = c01[0]*(1-tx) + c11[0]*tx, bg = c01[1]*(1-tx) + c11[1]*tx, bb2 = c01[2]*(1-tx) + c11[2]*tx;
+        *r = (tr*(1-ty) + br*ty) * vr;
+        *g = (tg*(1-ty) + bg*ty) * vg;
+        *bb = (tb*(1-ty) + bb2*ty) * vb;
+    } else {
+        float tc[4];
+        texel_rgba(t, (int)floorf(fx + 0.5f), (int)floorf(fy + 0.5f), tc);
+        *r = tc[0] * vr; *g = tc[1] * vg; *bb = tc[2] * vb;
     }
 }
 
@@ -251,12 +317,45 @@ SP_API int sp_create(int width, int height) {
     S.matrix_mode = SP_MODELVIEW;
     m4_identity(&S.proj); m4_identity(&S.modelview); m4_identity(&S.mvp);
     S.cur_r = S.cur_g = S.cur_b = 1.0f;
+    S.cur_u = S.cur_v = 0.0f;
+    S.cur_tex = 0;
     S.prim_mode = SP_TRIANGLES; S.vcount = 0;
     S.cull_enable = 1; S.depth_enable = 1;
     return 1;
 }
 SP_API void sp_cull_face(int enable) { S.cull_enable = enable ? 1 : 0; }
 SP_API void sp_depth_test(int enable) { S.depth_enable = enable ? 1 : 0; }
+
+/* ================= 纹理 API ================= */
+SP_API int sp_gen_texture(int w, int h, const unsigned char* rgba) {
+    if (w <= 0 || h <= 0 || !rgba) return 0;
+    for (int i = 0; i < SP_MAX_TEX; i++) {
+        if (!texs[i].rgba) {
+            texs[i].rgba = (unsigned char*)malloc((size_t)w * h * 4);
+            if (!texs[i].rgba) return 0;
+            memcpy(texs[i].rgba, rgba, (size_t)w * h * 4);
+            texs[i].w = w; texs[i].h = h;
+            texs[i].filter = SP_TEX_LINEAR; texs[i].wrap = SP_TEX_REPEAT;
+            return i + 1;
+        }
+    }
+    return 0;
+}
+SP_API void sp_delete_texture(int tex) {
+    if (tex < 1 || tex > SP_MAX_TEX) return;
+    Tex* t = &texs[tex - 1];
+    free(t->rgba);
+    memset(t, 0, sizeof(*t));
+    if (S.cur_tex == tex) S.cur_tex = 0;
+}
+SP_API void sp_bind_texture(int tex) { S.cur_tex = tex; }
+SP_API void sp_tex_filter(int mode) {
+    if (S.cur_tex > 0 && S.cur_tex <= SP_MAX_TEX) texs[S.cur_tex - 1].filter = mode;
+}
+SP_API void sp_tex_wrap(int mode) {
+    if (S.cur_tex > 0 && S.cur_tex <= SP_MAX_TEX) texs[S.cur_tex - 1].wrap = mode;
+}
+SP_API void sp_texcoord2f(float u, float v) { S.cur_u = u; S.cur_v = v; }
 
 /* ================= 硬件信息（纯 Win32 + 注册表，零第三方依赖） ================= */
 SP_API int sp_get_sysinfo(sp_sysinfo* out) {
@@ -442,6 +541,7 @@ SP_API int sp_get_sysinfo(sp_sysinfo* out) {
 }
 SP_API void sp_destroy(void) {
     free(S.color); free(S.depth);
+    for (int i = 0; i < SP_MAX_TEX; i++) { free(texs[i].rgba); memset(&texs[i], 0, sizeof(texs[i])); }
     memset(&S, 0, sizeof(S));
 }
 
@@ -515,6 +615,7 @@ SP_API void sp_vertex3f(float x, float y, float z) {
     struct Vtx* v = &S.verts[S.vcount++];
     v->x = x; v->y = y; v->z = z;
     v->r = S.cur_r; v->g = S.cur_g; v->b = S.cur_b;
+    v->u = S.cur_u; v->v = S.cur_v;
 }
 SP_API void sp_end(void) {
     /* MVP = P * MV */
