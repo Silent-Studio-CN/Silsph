@@ -54,6 +54,10 @@ SP_API void sp_look_at(float ex, float ey, float ez,
                        float cx, float cy, float cz,
                        float ux, float uy, float uz);
 SP_API void sp_rotate(float deg, float ax, float ay, float az); // 当前矩阵 *= 旋转
+SP_API void sp_translate(float x, float y, float z);              // 当前矩阵 *= 平移
+SP_API void sp_scale(float x, float y, float z);                  // 当前矩阵 *= 缩放
+SP_API void sp_push_matrix(void);   /* 保存当前 MODELVIEW 到栈（深度上限 16） */
+SP_API void sp_pop_matrix(void);    /* 恢复栈顶 */
 
 /* ---- 纹理 ---- */
 #define SP_TEX_NEAREST 0

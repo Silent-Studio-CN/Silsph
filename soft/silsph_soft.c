@@ -86,6 +86,15 @@ static void m4_look_at(Mat4* o, float ex, float ey, float ez,
     o->m[8]=zx; o->m[9]=zy; o->m[10]=zz; o->m[11]=-(zx*ex + zy*ey + zz*ez);
     o->m[12]=0.0f; o->m[13]=0.0f; o->m[14]=0.0f; o->m[15]=1.0f;
 }
+static void m4_translate(Mat4* o, float x, float y, float z) {
+    memset(o->m, 0, sizeof(o->m));
+    o->m[0]=1.0f; o->m[5]=1.0f; o->m[10]=1.0f; o->m[15]=1.0f;
+    o->m[3]=x; o->m[7]=y; o->m[11]=z;   /* 平移在第 4 列 */
+}
+static void m4_scale(Mat4* o, float x, float y, float z) {
+    memset(o->m, 0, sizeof(o->m));
+    o->m[0]=x; o->m[5]=y; o->m[10]=z; o->m[15]=1.0f;
+}
 /* 当前矩阵 *= 绕任意轴旋转 */
 static void m4_rotate(Mat4* o, float deg, float ax, float ay, float az) {
     float a = deg * (float)(M_PI / 180.0), c = cosf(a), s = sinf(a);
@@ -673,6 +682,25 @@ SP_API void sp_look_at(float ex, float ey, float ez,
 SP_API void sp_rotate(float deg, float ax, float ay, float az) {
     if (S.matrix_mode == SP_PROJECTION) m4_rotate(&S.proj, deg, ax, ay, az);
     else m4_rotate(&S.modelview, deg, ax, ay, az);
+}
+SP_API void sp_translate(float x, float y, float z) {
+    if (S.matrix_mode == SP_PROJECTION) { Mat4 t; m4_translate(&t, x, y, z); Mat4 r; m4_mul(&r, &S.proj, &t); S.proj = r; }
+    else { Mat4 t; m4_translate(&t, x, y, z); Mat4 r; m4_mul(&r, &S.modelview, &t); S.modelview = r; }
+}
+SP_API void sp_scale(float x, float y, float z) {
+    if (S.matrix_mode == SP_PROJECTION) { Mat4 t; m4_scale(&t, x, y, z); Mat4 r; m4_mul(&r, &S.proj, &t); S.proj = r; }
+    else { Mat4 t; m4_scale(&t, x, y, z); Mat4 r; m4_mul(&r, &S.modelview, &t); S.modelview = r; }
+}
+
+/* ---- MODELVIEW 矩阵栈（父子变换/场景图） ---- */
+#define SP_MAX_STACK 16
+static Mat4 mv_stack[SP_MAX_STACK];
+static int mv_depth = 0;
+SP_API void sp_push_matrix(void) {
+    if (mv_depth < SP_MAX_STACK) mv_stack[mv_depth++] = S.modelview;
+}
+SP_API void sp_pop_matrix(void) {
+    if (mv_depth > 0) S.modelview = mv_stack[--mv_depth];
 }
 SP_API void sp_begin(int mode) { S.prim_mode = mode; S.vcount = 0; }
 SP_API void sp_color3f(float r, float g, float b) { S.cur_r = r; S.cur_g = g; S.cur_b = b; }
