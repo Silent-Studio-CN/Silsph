@@ -1,0 +1,18 @@
+# 构建产物
+*.exe
+*.dll
+*.dll.a
+*.so
+*.dylib
+*.o
+*.a
+
+# 运行产物
+*.bmp
+*.png
+*.log
+silsph_hwnd.txt
+silsph_fps.txt
+
+# 临时
+tmp/

@@ -1,0 +1,566 @@
+// silsph_soft.c — Silsph 软件渲染管线（纯 C，零依赖）
+// 管线：顶点变换(MVP) → 图元装配 → 背面剔除 → 光栅化(edge function) → 透视校正插值 → 深度测试
+#include "silsph_soft.h"
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <stdio.h>   /* SP_DEBUG 调试输出用 */
+#ifdef _WIN32
+#include <windows.h> /* 硬件信息（注册表/系统 API）+ QPC + Sleep */
+#else
+#include <time.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/utsname.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#endif
+#endif
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+#define MAX_VERTS 8192
+
+/* ================= 数学（行主序 4x4，与 silsph.cpp 约定一致） ================= */
+typedef struct { float m[16]; } Mat4;
+
+static void m4_identity(Mat4* o) {
+    memset(o->m, 0, sizeof(o->m));
+    o->m[0] = o->m[5] = o->m[10] = o->m[15] = 1.0f;
+}
+static void m4_mul(Mat4* o, const Mat4* a, const Mat4* b) { /* o = a*b */
+    Mat4 t;
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++) {
+            float s = 0.0f;
+            for (int k = 0; k < 4; k++) s += a->m[i*4+k] * b->m[k*4+j];
+            t.m[i*4+j] = s;
+        }
+    *o = t;
+}
+/* 标准 OpenGL 透视矩阵（右手系，-z 朝前），列向量约定（v' = M·v）：
+   row2 = [0, 0, A, B]，row3 = [0, 0, -1, 0]  →  m[11]=B, m[14]=-1
+   （注意：silsph.cpp 是行向量约定，其 m[11]/m[14] 与此相反，勿照搬） */
+static void m4_perspective(Mat4* o, float fovy_deg, float aspect, float zn, float zf) {
+    float f = 1.0f / tanf(fovy_deg * 0.5f * (float)(M_PI / 180.0));
+    memset(o->m, 0, sizeof(o->m));
+    o->m[0]  = f / aspect;
+    o->m[5]  = f;
+    o->m[10] = (zf + zn) / (zn - zf);
+    o->m[11] = (2.0f * zf * zn) / (zn - zf);
+    o->m[14] = -1.0f;
+    /* m[15] = 0 */
+}
+static void m4_look_at(Mat4* o, float ex, float ey, float ez,
+                       float cx, float cy, float cz,
+                       float ux, float uy, float uz) {
+    /* z = eye - center（相机看向 -z） */
+    float zx = ex-cx, zy = ey-cy, zz = ez-cz;
+    float len = sqrtf(zx*zx + zy*zy + zz*zz);
+    zx /= len; zy /= len; zz /= len;
+    /* x = up x z */
+    float xx = uy*zz - uz*zy, xy = uz*zx - ux*zz, xz = ux*zy - uy*zx;
+    len = sqrtf(xx*xx + xy*xy + xz*xz);
+    xx /= len; xy /= len; xz /= len;
+    /* y = z x x */
+    float yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+    /* 行主序 [R t; 0 1]：R 的行 = 基向量，平移 t = -R*eye 在【第 4 列】m[3]/m[7]/m[11]！ */
+    o->m[0]=xx; o->m[1]=xy; o->m[2]=xz;  o->m[3]=-(xx*ex + xy*ey + xz*ez);
+    o->m[4]=yx; o->m[5]=yy; o->m[6]=yz;  o->m[7]=-(yx*ex + yy*ey + yz*ez);
+    o->m[8]=zx; o->m[9]=zy; o->m[10]=zz; o->m[11]=-(zx*ex + zy*ey + zz*ez);
+    o->m[12]=0.0f; o->m[13]=0.0f; o->m[14]=0.0f; o->m[15]=1.0f;
+}
+/* 当前矩阵 *= 绕任意轴旋转 */
+static void m4_rotate(Mat4* o, float deg, float ax, float ay, float az) {
+    float a = deg * (float)(M_PI / 180.0), c = cosf(a), s = sinf(a);
+    float l = sqrtf(ax*ax + ay*ay + az*az);
+    ax /= l; ay /= l; az /= l;
+    Mat4 r;
+    r.m[0]=c+ax*ax*(1-c);    r.m[1]=ax*ay*(1-c)-az*s; r.m[2]=ax*az*(1-c)+ay*s; r.m[3]=0;
+    r.m[4]=ay*ax*(1-c)+az*s; r.m[5]=c+ay*ay*(1-c);    r.m[6]=ay*az*(1-c)-ax*s; r.m[7]=0;
+    r.m[8]=az*ax*(1-c)-ay*s; r.m[9]=az*ay*(1-c)+ax*s; r.m[10]=c+az*az*(1-c);  r.m[11]=0;
+    r.m[12]=0; r.m[13]=0; r.m[14]=0; r.m[15]=1;
+    Mat4 t; m4_mul(&t, o, &r); *o = t;
+}
+/* 行主序矩阵变换列向量：o = M * v，o[i] = Σ_j m[i*4+j] * v[j]
+   注意：行主序下第 i 行的元素是 m[i*4+0..3]（勿用列主序索引 m[0],m[4],m[8],m[12]！） */
+static void m4_transform(const Mat4* m, float x, float y, float z, float w,
+                         float* ox, float* oy, float* oz, float* ow) {
+    *ox = m->m[0]*x + m->m[1]*y + m->m[2]*z  + m->m[3]*w;
+    *oy = m->m[4]*x + m->m[5]*y + m->m[6]*z  + m->m[7]*w;
+    *oz = m->m[8]*x + m->m[9]*y + m->m[10]*z + m->m[11]*w;
+    *ow = m->m[12]*x + m->m[13]*y + m->m[14]*z + m->m[15]*w;
+}
+
+/* ================= 状态机 ================= */
+static struct {
+    int      width, height;          /* 帧缓冲尺寸 */
+    int      vp_x, vp_y, vp_w, vp_h; /* 视口 */
+    uint32_t* color;                 /* 颜色缓冲，值 0xAABBGGRR，内存序 B,G,R,A */
+    float*   depth;                  /* 深度缓冲（NDC z，-1..1） */
+    float    clear_r, clear_g, clear_b;
+    int      matrix_mode;
+    Mat4     proj, modelview, mvp;
+    int      prim_mode;
+    int      vcount;
+    int      cull_enable;    /* 背面剔除开关 */
+    int      depth_enable;   /* 深度测试开关 */
+    float    cur_r, cur_g, cur_b;
+    struct Vtx { float x, y, z; float r, g, b; } verts[MAX_VERTS];
+} S;
+
+/* clip 空间顶点（透视除法前）：用于近平面裁剪，属性与几何同步插值 */
+typedef struct { float x, y, z, w; float r, g, b; } ClipV;
+/* 屏幕坐标顶点：y 向上（与 GL 窗口坐标一致）+ clip z/w + 颜色 */
+typedef struct { float sx, sy; float zc, wc; float r, g, b; } Pv;
+
+static void xform_vertex(const struct Vtx* v, ClipV* o) {
+    m4_transform(&S.mvp, v->x, v->y, v->z, 1.0f, &o->x, &o->y, &o->z, &o->w);
+    o->r = v->r; o->g = v->g; o->b = v->b;
+}
+
+/* clip 空间 -> 屏幕坐标（透视除法 + 视口变换） */
+static void to_screen(const ClipV* c, Pv* o) {
+    float inv = 1.0f / c->w;
+    float nx = c->x * inv, ny = c->y * inv;
+    o->sx = (nx * 0.5f + 0.5f) * (float)S.vp_w + (float)S.vp_x;
+    o->sy = (ny * 0.5f + 0.5f) * (float)S.vp_h + (float)S.vp_y;
+    o->zc = c->z; o->wc = c->w;
+    o->r = c->r; o->g = c->g; o->b = c->b;
+}
+
+/* Sutherland-Hodgman：对近平面裁剪（clip 空间 f(p) = p.z + p.w >= 0，即视空间 z >= -near）。
+   注意：不能裁剪 w=0 平面——交点 w≈0 会投影到 ±1e6 坐标，edge function 浮点精度崩溃；
+   近平面交点 w = near（几何上 = near 处），数值稳定，且近平面在相机前，自动覆盖相机后顶点。 */
+static float fclip(const ClipV* p) { return p->z + p->w; }
+static ClipV lerp_v(const ClipV* a, const ClipV* b, float t) {
+    ClipV o;
+    o.x = a->x + (b->x - a->x) * t;
+    o.y = a->y + (b->y - a->y) * t;
+    o.z = a->z + (b->z - a->z) * t;
+    o.w = a->w + (b->w - a->w) * t;
+    o.r = a->r + (b->r - a->r) * t;
+    o.g = a->g + (b->g - a->g) * t;
+    o.b = a->b + (b->b - a->b) * t;
+    return o;
+}
+static void clip_near(const ClipV in[3], ClipV out[6], int* nout) {
+    int n = 0;
+    const ClipV* prev = &in[2];
+    float fprev = fclip(prev);
+    int prev_in = fprev >= 0.0f;
+    for (int i = 0; i < 3; i++) {
+        const ClipV* cur = &in[i];
+        float fcur = fclip(cur);
+        int cur_in = fcur >= 0.0f;
+        if (cur_in) {
+            if (!prev_in) /* 进入：插值交点 f=0 */
+                out[n++] = lerp_v(prev, cur, -fprev / (fcur - fprev));
+            out[n++] = *cur;
+        } else if (prev_in) /* 离开：插值交点 f=0 */
+            out[n++] = lerp_v(prev, cur, -fprev / (fcur - fprev));
+        prev = cur; fprev = fcur; prev_in = cur_in;
+    }
+    *nout = n;
+}
+
+static void put_pixel(int x, int y_up, float zndc, float r, float g, float b) {
+    if (x < S.vp_x || x >= S.vp_x + S.vp_w) return;
+    if (y_up < S.vp_y || y_up >= S.vp_y + S.vp_h) return;
+    int row = S.height - 1 - y_up;          /* 窗口 y 向上 -> 帧缓冲行（顶行=0） */
+    float* d = &S.depth[row * S.width + x];
+    if (S.depth_enable) {
+        if (zndc >= *d) return;             /* 深度测试 LESS */
+        *d = zndc;
+    }
+    uint32_t ri = (uint32_t)((r < 0 ? 0 : (r > 1 ? 1 : r)) * 255.0f);
+    uint32_t gi = (uint32_t)((g < 0 ? 0 : (g > 1 ? 1 : g)) * 255.0f);
+    uint32_t bi = (uint32_t)((b < 0 ? 0 : (b > 1 ? 1 : b)) * 255.0f);
+    S.color[row * S.width + x] = 0xFF000000u | (ri << 16) | (gi << 8) | bi;
+}
+
+/* ================= 光栅化：三角形（edge function + 重心坐标 + 透视校正） ================= */
+static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
+    /* 背面剔除：GL 窗口坐标（y 向上）CCW 为正面；signed area > 0 即 CCW，剔除其余（对应 CULL_BACK） */
+    float area = (b->sx - a->sx) * (c->sy - a->sy) - (b->sy - a->sy) * (c->sx - a->sx);
+    if (S.cull_enable && area <= 0.0f) return;
+    /* 顶点已过近平面裁剪（w > 0），此处不再检查 */
+    float inv_area = 1.0f / area;
+    int minx = (int)ceilf(fminf(a->sx, fminf(b->sx, c->sx)));
+    int maxx = (int)floorf(fmaxf(a->sx, fmaxf(b->sx, c->sx)));
+    int miny = (int)ceilf(fminf(a->sy, fminf(b->sy, c->sy)));
+    int maxy = (int)floorf(fmaxf(a->sy, fmaxf(b->sy, c->sy)));
+    if (minx < S.vp_x) minx = S.vp_x;
+    if (maxx > S.vp_x + S.vp_w - 1) maxx = S.vp_x + S.vp_w - 1;
+    if (miny < S.vp_y) miny = S.vp_y;
+    if (maxy > S.vp_y + S.vp_h - 1) maxy = S.vp_y + S.vp_h - 1;
+    for (int y = miny; y <= maxy; y++) {
+        float py = (float)y + 0.5f;
+        for (int x = minx; x <= maxx; x++) {
+            float px = (float)x + 0.5f;
+            /* Pineda edge functions：CCW 三角形内部全部 >= 0 */
+            float w0 = (b->sx - a->sx) * (py - a->sy) - (b->sy - a->sy) * (px - a->sx);
+            float w1 = (c->sx - b->sx) * (py - b->sy) - (c->sy - b->sy) * (px - b->sx);
+            float w2 = (a->sx - c->sx) * (py - c->sy) - (a->sy - c->sy) * (px - c->sx);
+            if (w0 < 0.0f || w1 < 0.0f || w2 < 0.0f) continue;
+            float b0 = w0 * inv_area, b1 = w1 * inv_area, b2 = w2 * inv_area;
+            /* 透视正确插值：clip 坐标在屏幕空间线性；深度 = lerp(z_clip)/lerp(w_clip) */
+            float denom = b0 * a->wc + b1 * b->wc + b2 * c->wc;
+            if (denom <= 0.0f) continue;
+            float zndc = (b0 * a->zc + b1 * b->zc + b2 * c->zc) / denom;
+            float iw = b0 / a->wc + b1 / b->wc + b2 / c->wc;
+            float r = (b0 * a->r / a->wc + b1 * b->r / b->wc + b2 * c->r / c->wc) / iw;
+            float g = (b0 * a->g / a->wc + b1 * b->g / b->wc + b2 * c->g / c->wc) / iw;
+            float bb = (b0 * a->b / a->wc + b1 * b->b / b->wc + b2 * c->b / c->wc) / iw;
+            put_pixel(x, y, zndc, r, g, bb);
+        }
+    }
+}
+
+/* ================= 光栅化：线段（DDA + 深度测试） ================= */
+static void raster_line(const Pv* a, const Pv* b) {
+    if (a->wc <= 0.0f || b->wc <= 0.0f) return;
+    float dx = b->sx - a->sx, dy = b->sy - a->sy;
+    int steps = (int)fmaxf(fabsf(dx), fabsf(dy)) + 1;
+    for (int i = 0; i <= steps; i++) {
+        float t = (float)i / (float)steps;
+        float x = a->sx + dx * t, y = a->sy + dy * t;
+        float zc = a->zc + (b->zc - a->zc) * t;
+        float wc = a->wc + (b->wc - a->wc) * t;
+        float r = a->r + (b->r - a->r) * t;
+        float g = a->g + (b->g - a->g) * t;
+        float bb = a->b + (b->b - a->b) * t;
+        if (wc <= 0.0f) continue;
+        put_pixel((int)x, (int)y, zc / wc, r, g, bb);
+    }
+}
+
+/* ================= 公共 API ================= */
+SP_API int sp_create(int width, int height) {
+    S.color = (uint32_t*)malloc((size_t)width * height * sizeof(uint32_t));
+    S.depth = (float*)malloc((size_t)width * height * sizeof(float));
+    if (!S.color || !S.depth) { sp_destroy(); return 0; }
+    S.width = width; S.height = height;
+    sp_viewport(0, 0, width, height);
+    sp_clear_color(0.0f, 0.0f, 0.0f, 1.0f);
+    S.matrix_mode = SP_MODELVIEW;
+    m4_identity(&S.proj); m4_identity(&S.modelview); m4_identity(&S.mvp);
+    S.cur_r = S.cur_g = S.cur_b = 1.0f;
+    S.prim_mode = SP_TRIANGLES; S.vcount = 0;
+    S.cull_enable = 1; S.depth_enable = 1;
+    return 1;
+}
+SP_API void sp_cull_face(int enable) { S.cull_enable = enable ? 1 : 0; }
+SP_API void sp_depth_test(int enable) { S.depth_enable = enable ? 1 : 0; }
+
+/* ================= 硬件信息（纯 Win32 + 注册表，零第三方依赖） ================= */
+SP_API int sp_get_sysinfo(sp_sysinfo* out) {
+    if (!out) return 0;
+    memset(out, 0, sizeof(*out));
+#ifdef _WIN32
+    /* CPU：注册表（品牌名 + 标称主频） */
+    HKEY key = NULL;
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE,
+                      "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+                      0, KEY_READ, &key) == ERROR_SUCCESS) {
+        DWORD sz = sizeof(out->cpu_name);
+        RegQueryValueExA(key, "ProcessorNameString", NULL, NULL, (LPBYTE)out->cpu_name, &sz);
+        DWORD mhz = 0; sz = sizeof(mhz);
+        RegQueryValueExA(key, "~MHz", NULL, NULL, (LPBYTE)&mhz, &sz);
+        out->cpu_mhz = (int)mhz;
+        RegCloseKey(key);
+    }
+    /* CPU 核心/线程数 */
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    out->cpu_threads = (int)si.dwNumberOfProcessors;
+    DWORD len = 0;
+    GetLogicalProcessorInformation(NULL, &len);
+    if (len) {
+        SYSTEM_LOGICAL_PROCESSOR_INFORMATION* info =
+            (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)malloc(len);
+        if (info && GetLogicalProcessorInformation(info, &len)) {
+            DWORD n = len / (DWORD)sizeof(*info);
+            for (DWORD i = 0; i < n; i++)
+                if (info[i].Relationship == RelationProcessorCore) out->cpu_cores++;
+        }
+        free(info);
+    }
+    if (out->cpu_cores <= 0) out->cpu_cores = out->cpu_threads;
+
+    /* 内存 */
+    MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
+    if (GlobalMemoryStatusEx(&ms)) {
+        out->mem_total_mb = ms.ullTotalPhys / (1024ull * 1024);
+        out->mem_avail_mb = ms.ullAvailPhys / (1024ull * 1024);
+    }
+
+    /* GPU：显示适配器类注册表，枚举 0000..0009 */
+    const char* gpuCls = "SYSTEM\\CurrentControlSet\\Control\\Class\\"
+                         "{4d36e968-e325-11ce-bfc1-08002be10318}";
+    for (int i = 0; i < 10 && out->gpu_name[0] == 0; i++) {
+        char sub[160];
+        sprintf(sub, "%s\\%04d", gpuCls, i);
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, sub, 0, KEY_READ, &key) != ERROR_SUCCESS)
+            continue;
+        DWORD sz = sizeof(out->gpu_name);
+        DWORD type = 0;
+        LONG qr = RegQueryValueExA(key, "DriverDesc", NULL, &type,
+                                   (LPBYTE)out->gpu_name, &sz);
+        if (qr == ERROR_SUCCESS && type == REG_SZ && out->gpu_name[0]) {
+            BYTE buf[8] = {0}; sz = sizeof(buf);
+            if (RegQueryValueExA(key, "HardwareInformation.qwMemorySize",
+                                 NULL, NULL, buf, &sz) == ERROR_SUCCESS && sz == 8) {
+                unsigned long long vram = 0;
+                memcpy(&vram, buf, 8);
+                out->gpu_vram_mb = vram / (1024ull * 1024);
+            }
+        } else {
+            out->gpu_name[0] = 0;
+        }
+        RegCloseKey(key);
+    }
+    if (out->gpu_name[0] == 0)
+        sprintf(out->gpu_name, "(unknown)");
+
+    /* OS 版本：RtlGetVersion（ntdll，GetProcAddress 获取，无需链接） */
+    typedef LONG(WINAPI* RtlGetVersionFn)(void*);
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    if (ntdll) {
+        RtlGetVersionFn fn = (RtlGetVersionFn)(void*)GetProcAddress(ntdll, "RtlGetVersion");
+        if (fn) {
+            struct { ULONG sz; ULONG major, minor, build, rev; } ovi;
+            memset(&ovi, 0, sizeof(ovi)); ovi.sz = sizeof(ovi);
+            if (fn(&ovi) == 0) {
+                out->os_major   = (int)ovi.major;
+                out->os_minor   = (int)ovi.minor;
+                out->os_build   = (int)ovi.build;
+            }
+        }
+    }
+#elif defined(__APPLE__)
+    /* macOS：sysctl（零依赖） */
+    size_t slen = sizeof(out->cpu_name);
+    if (sysctlbyname("machdep.cpu.brand_string", out->cpu_name, &slen, NULL, 0) != 0)
+        out->cpu_name[0] = 0;
+    int ncpu = 0;
+    slen = sizeof(ncpu);
+    if (sysctlbyname("hw.logicalcpu", &ncpu, &slen, NULL, 0) == 0) out->cpu_threads = ncpu;
+    if (sysctlbyname("hw.physicalcpu", &ncpu, &slen, NULL, 0) == 0) out->cpu_cores = ncpu;
+    uint64_t mem = 0;
+    slen = sizeof(mem);
+    if (sysctlbyname("hw.memsize", &mem, &slen, NULL, 0) == 0)
+        out->mem_total_mb = mem / (1024ull * 1024);
+    /* Apple Silicon/Intel 统一内存：GPU = SoC 集成（品牌名即芯片名） */
+    if (out->cpu_name[0])
+        snprintf(out->gpu_name, sizeof(out->gpu_name), "%s (integrated)", out->cpu_name);
+    else
+        snprintf(out->gpu_name, sizeof(out->gpu_name), "Apple (integrated)");
+    char osver[32] = {0};
+    slen = sizeof(osver);
+    if (sysctlbyname("kern.osproductversion", osver, &slen, NULL, 0) == 0)
+        sscanf(osver, "%d.%d", &out->os_major, &out->os_minor);
+#else
+    /* Linux：/proc/cpuinfo + /proc/meminfo + /sys/class/drm + uname（零依赖） */
+    FILE* f = fopen("/proc/cpuinfo", "r");
+    if (f) {
+        char line[512];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "model name", 10) == 0 && !out->cpu_name[0]) {
+                char* p = strchr(line, ':');
+                if (p) {
+                    p++;
+                    while (*p == ' ') p++;
+                    char* e = p + strlen(p);
+                    while (e > p && (e[-1] == '\n' || e[-1] == ' ')) e--;
+                    *e = 0;
+                    strncpy(out->cpu_name, p, sizeof(out->cpu_name) - 1);
+                }
+            } else if (strncmp(line, "cpu MHz", 7) == 0 && out->cpu_mhz == 0) {
+                float mhz = 0;
+                sscanf(line, "cpu MHz : %f", &mhz);
+                out->cpu_mhz = (int)mhz;
+            } else if (strncmp(line, "cpu cores", 9) == 0 && out->cpu_cores == 0) {
+                sscanf(line, "cpu cores : %d", &out->cpu_cores);
+            }
+        }
+        fclose(f);
+    }
+    out->cpu_threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (out->cpu_cores <= 0) out->cpu_cores = out->cpu_threads;
+    f = fopen("/proc/meminfo", "r");
+    if (f) {
+        char line[256];
+        unsigned long long kb = 0;
+        while (fgets(line, sizeof(line), f)) {
+            if (sscanf(line, "MemTotal: %llu kB", &kb) == 1)
+                out->mem_total_mb = kb / 1024;
+            else if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1)
+                out->mem_avail_mb = kb / 1024;
+        }
+        fclose(f);
+    }
+    /* GPU：/sys/class/drm 第一个 card 的驱动名（i915/amdgpu/nvidia...） */
+    DIR* d = opendir("/sys/class/drm");
+    if (d) {
+        struct dirent* e;
+        while ((e = readdir(d)) != NULL && !out->gpu_name[0]) {
+            if (strncmp(e->d_name, "card", 4) == 0 && !strchr(e->d_name, '-')) {
+                char path[256], ue[256];
+                snprintf(path, sizeof(path), "/sys/class/drm/%s/device/uevent", e->d_name);
+                FILE* uf = fopen(path, "r");
+                if (uf) {
+                    while (fgets(ue, sizeof(ue), uf))
+                        if (sscanf(ue, "DRIVER=%127s", out->gpu_name) == 1) break;
+                    fclose(uf);
+                }
+                snprintf(path, sizeof(path), "/sys/class/drm/%s/device/mem_info_vram_total",
+                         e->d_name);
+                uf = fopen(path, "r");
+                if (uf) {
+                    unsigned long long vram = 0;
+                    if (fscanf(uf, "%llu", &vram) == 1)
+                        out->gpu_vram_mb = vram / (1024ull * 1024);
+                    fclose(uf);
+                }
+            }
+        }
+        closedir(d);
+    }
+    if (!out->gpu_name[0])
+        snprintf(out->gpu_name, sizeof(out->gpu_name), "(unknown)");
+    struct utsname u;
+    if (uname(&u) == 0)
+        sscanf(u.release, "%d.%d", &out->os_major, &out->os_minor);
+#endif
+    return 1;
+}
+SP_API void sp_destroy(void) {
+    free(S.color); free(S.depth);
+    memset(&S, 0, sizeof(S));
+}
+
+/* ================= 平台工具（跨平台） ================= */
+SP_API double sp_now_ms(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq; static int once = 0;
+    if (!once) { QueryPerformanceFrequency(&freq); once = 1; }
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1000.0 / (double)freq.QuadPart;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+#endif
+}
+SP_API void sp_sleep_ms(double ms) {
+    if (ms <= 0.0) return;
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec req, rem;
+    req.tv_sec = (time_t)(ms / 1000.0);
+    req.tv_nsec = (long)((ms - (double)req.tv_sec * 1000.0) * 1e6);
+    while (nanosleep(&req, &rem) == -1 && rem.tv_nsec >= 0) req = rem; /* EINTR 重试 */
+#endif
+}
+SP_API void sp_viewport(int x, int y, int w, int h) {
+    S.vp_x = x; S.vp_y = y; S.vp_w = w; S.vp_h = h;
+}
+SP_API void sp_clear_color(float r, float g, float b, float a) {
+    (void)a; S.clear_r = r; S.clear_g = g; S.clear_b = b;
+}
+SP_API void sp_clear(unsigned flags) {
+    if (flags & SP_COLOR) {
+        uint32_t c = 0xFF000000u
+                   | ((uint32_t)(S.clear_r * 255.0f) << 16)
+                   | ((uint32_t)(S.clear_g * 255.0f) << 8)
+                   | (uint32_t)(S.clear_b * 255.0f);
+        for (int i = 0; i < S.width * S.height; i++) S.color[i] = c;
+    }
+    if (flags & SP_DEPTH)
+        for (int i = 0; i < S.width * S.height; i++) S.depth[i] = 1.0f; /* NDC 最远 */
+}
+SP_API const unsigned char* sp_pixels(int* w, int* h) {
+    if (w) *w = S.width;
+    if (h) *h = S.height;
+    return (const unsigned char*)S.color;
+}
+SP_API void sp_matrix_mode(int mode) { S.matrix_mode = mode; }
+SP_API void sp_load_identity(void) {
+    if (S.matrix_mode == SP_PROJECTION) m4_identity(&S.proj);
+    else m4_identity(&S.modelview);
+}
+SP_API void sp_perspective(float fovy_deg, float aspect, float znear, float zfar) {
+    m4_perspective(&S.proj, fovy_deg, aspect, znear, zfar);
+}
+SP_API void sp_look_at(float ex, float ey, float ez,
+                       float cx, float cy, float cz,
+                       float ux, float uy, float uz) {
+    m4_look_at(&S.modelview, ex, ey, ez, cx, cy, cz, ux, uy, uz);
+}
+SP_API void sp_rotate(float deg, float ax, float ay, float az) {
+    if (S.matrix_mode == SP_PROJECTION) m4_rotate(&S.proj, deg, ax, ay, az);
+    else m4_rotate(&S.modelview, deg, ax, ay, az);
+}
+SP_API void sp_begin(int mode) { S.prim_mode = mode; S.vcount = 0; }
+SP_API void sp_color3f(float r, float g, float b) { S.cur_r = r; S.cur_g = g; S.cur_b = b; }
+SP_API void sp_vertex3f(float x, float y, float z) {
+    if (S.vcount >= MAX_VERTS) return;
+    struct Vtx* v = &S.verts[S.vcount++];
+    v->x = x; v->y = y; v->z = z;
+    v->r = S.cur_r; v->g = S.cur_g; v->b = S.cur_b;
+}
+SP_API void sp_end(void) {
+    /* MVP = P * MV */
+    m4_mul(&S.mvp, &S.proj, &S.modelview);
+#ifdef SP_DEBUG
+    fprintf(stderr, "MVP: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
+        S.mvp.m[0],S.mvp.m[1],S.mvp.m[2],S.mvp.m[3], S.mvp.m[4],S.mvp.m[5],S.mvp.m[6],S.mvp.m[7],
+        S.mvp.m[8],S.mvp.m[9],S.mvp.m[10],S.mvp.m[11], S.mvp.m[12],S.mvp.m[13],S.mvp.m[14],S.mvp.m[15]);
+#endif
+    int n = S.vcount;
+    if (S.prim_mode == SP_TRIANGLES) {
+        for (int i = 0; i + 2 < n; i += 3) {
+            ClipV cv[3];
+            xform_vertex(&S.verts[i],   &cv[0]);
+            xform_vertex(&S.verts[i+1], &cv[1]);
+            xform_vertex(&S.verts[i+2], &cv[2]);
+            ClipV poly[6]; int np = 0;
+            clip_near(cv, poly, &np);          /* 近平面（w）裁剪 */
+#ifdef SP_DEBUG
+            if (np >= 3) {
+                Pv sa; to_screen(&poly[0], &sa);
+                fprintf(stderr, "tri: np=%d A(%.0f,%.0f w=%.3f)", np, sa.sx, sa.sy, sa.wc);
+                for (int k = 1; k < np; k++) {
+                    Pv s; to_screen(&poly[k], &s);
+                    fprintf(stderr, " (%.0f,%.0f w=%.3f)", s.sx, s.sy, s.wc);
+                }
+                fprintf(stderr, "\n");
+            }
+#endif
+            if (np < 3) continue;              /* 完全在相机后 */
+            Pv a, b, c;
+            to_screen(&poly[0], &a);
+            for (int k = 1; k + 1 < np; k++) { /* 扇形三角化（裁剪后最多 4 边形） */
+                to_screen(&poly[k],   &b);
+                to_screen(&poly[k+1], &c);
+                raster_tri(&a, &b, &c);
+            }
+        }
+    } else if (S.prim_mode == SP_LINES) {
+        for (int i = 0; i + 1 < n; i += 2) {
+            ClipV cva, cvb;
+            xform_vertex(&S.verts[i],   &cva);
+            xform_vertex(&S.verts[i+1], &cvb);
+            Pv a, b;
+            to_screen(&cva, &a);
+            to_screen(&cvb, &b);
+            raster_line(&a, &b);
+        }
+    }
+    S.vcount = 0;
+}
