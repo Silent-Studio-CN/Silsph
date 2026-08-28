@@ -21,9 +21,13 @@
 #define SP_COLOR 0x4000
 #define SP_DEPTH 0x0100
 
-/* ---- 图元模式 ---- */
-#define SP_TRIANGLES 0x0004
-#define SP_LINES     0x0001
+/* ---- 图元模式（GL 风格值） ---- */
+#define SP_POINTS         0x0000
+#define SP_LINES          0x0001
+#define SP_LINE_STRIP     0x0003
+#define SP_TRIANGLES      0x0004
+#define SP_TRIANGLE_STRIP 0x0005
+#define SP_TRIANGLE_FAN   0x0006
 
 /* ---- 矩阵模式 ---- */
 #define SP_MODELVIEW  0x1700
@@ -45,6 +49,7 @@ SP_API const unsigned char* sp_pixels(int* w, int* h);   // 颜色缓冲，内�
 SP_API void sp_matrix_mode(int mode);
 SP_API void sp_load_identity(void);
 SP_API void sp_perspective(float fovy_deg, float aspect, float znear, float zfar);
+SP_API void sp_ortho(float left, float right, float bottom, float top, float znear, float zfar);
 SP_API void sp_look_at(float ex, float ey, float ez,
                        float cx, float cy, float cz,
                        float ux, float uy, float uz);

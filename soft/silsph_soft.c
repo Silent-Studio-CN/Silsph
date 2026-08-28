@@ -56,6 +56,17 @@ static void m4_perspective(Mat4* o, float fovy_deg, float aspect, float zn, floa
     o->m[14] = -1.0f;
     /* m[15] = 0 */
 }
+/* 标准 OpenGL 正交矩阵（行主序，列向量约定）：平移放第 4 列 m[3]/m[7]/m[11]（与 lookAt 一致） */
+static void m4_ortho(Mat4* o, float l, float r, float b, float t, float zn, float zf) {
+    memset(o->m, 0, sizeof(o->m));
+    o->m[0]  = 2.0f / (r - l);
+    o->m[5]  = 2.0f / (t - b);
+    o->m[10] = -2.0f / (zf - zn);
+    o->m[3]  = -(r + l) / (r - l);
+    o->m[7]  = -(t + b) / (t - b);
+    o->m[11] = -(zf + zn) / (zf - zn);
+    o->m[15] = 1.0f;
+}
 static void m4_look_at(Mat4* o, float ex, float ey, float ez,
                        float cx, float cy, float cz,
                        float ux, float uy, float uz) {
@@ -281,6 +292,12 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
             put_pixel(x, y, zndc, r, g, bb, al);
         }
     }
+}
+
+/* ================= 光栅化：点（1 像素） ================= */
+static void raster_point(const Pv* p) {
+    int x = (int)p->sx, y = (int)p->sy;
+    put_pixel(x, y, p->zc / p->wc, p->r, p->g, p->b, 1.0f);
 }
 
 /* ================= 纹理采样 ================= */
@@ -645,6 +662,9 @@ SP_API void sp_load_identity(void) {
 SP_API void sp_perspective(float fovy_deg, float aspect, float znear, float zfar) {
     m4_perspective(&S.proj, fovy_deg, aspect, znear, zfar);
 }
+SP_API void sp_ortho(float left, float right, float bottom, float top, float znear, float zfar) {
+    m4_ortho(&S.proj, left, right, bottom, top, znear, zfar);
+}
 SP_API void sp_look_at(float ex, float ey, float ez,
                        float cx, float cy, float cz,
                        float ux, float uy, float uz) {
@@ -663,53 +683,81 @@ SP_API void sp_vertex3f(float x, float y, float z) {
     v->r = S.cur_r; v->g = S.cur_g; v->b = S.cur_b;
     v->u = S.cur_u; v->v = S.cur_v;
 }
+/* ---- 图元发射器（共用的装配/裁剪/光栅化路径） ---- */
+static void emit_tri(const struct Vtx* v0, const struct Vtx* v1, const struct Vtx* v2) {
+    ClipV cv[3];
+    xform_vertex(v0, &cv[0]);
+    xform_vertex(v1, &cv[1]);
+    xform_vertex(v2, &cv[2]);
+    ClipV poly[12];
+    int np = clip_frustum(cv, poly);   /* 6 平面视锥裁剪 */
+#ifdef SP_DEBUG
+    if (np >= 3) {
+        fprintf(stderr, "tri: np=%d", np);
+        for (int k = 0; k < np; k++) {
+            Pv s; to_screen(&poly[k], &s);
+            fprintf(stderr, " (%.1f,%.1f w=%.3f)", s.sx, s.sy, s.wc);
+        }
+        fprintf(stderr, "\n");
+    }
+#endif
+    if (np < 3) return;                /* 完全在视锥外 */
+    Pv a, b, c;
+    to_screen(&poly[0], &a);
+    for (int k = 1; k + 1 < np; k++) { /* 扇形三角化（裁剪后至多 9 边形） */
+        to_screen(&poly[k],   &b);
+        to_screen(&poly[k+1], &c);
+        raster_tri(&a, &b, &c);
+    }
+}
+static void emit_line(const struct Vtx* v0, const struct Vtx* v1) {
+    ClipV cva, cvb;
+    xform_vertex(v0, &cva);
+    xform_vertex(v1, &cvb);
+    Pv a, b;
+    to_screen(&cva, &a);
+    to_screen(&cvb, &b);
+    raster_line(&a, &b);
+}
+static void emit_point(const struct Vtx* v0) {
+    ClipV cv;
+    xform_vertex(v0, &cv);
+    if (cv.w <= 0.0f) return;
+    Pv p;
+    to_screen(&cv, &p);
+    raster_point(&p);
+}
+
 SP_API void sp_end(void) {
     /* MVP = P * MV */
     m4_mul(&S.mvp, &S.proj, &S.modelview);
-#ifdef SP_DEBUG
-    fprintf(stderr, "MVP: %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f\n",
-        S.mvp.m[0],S.mvp.m[1],S.mvp.m[2],S.mvp.m[3], S.mvp.m[4],S.mvp.m[5],S.mvp.m[6],S.mvp.m[7],
-        S.mvp.m[8],S.mvp.m[9],S.mvp.m[10],S.mvp.m[11], S.mvp.m[12],S.mvp.m[13],S.mvp.m[14],S.mvp.m[15]);
-#endif
     int n = S.vcount;
-    if (S.prim_mode == SP_TRIANGLES) {
-        for (int i = 0; i + 2 < n; i += 3) {
-            ClipV cv[3];
-            xform_vertex(&S.verts[i],   &cv[0]);
-            xform_vertex(&S.verts[i+1], &cv[1]);
-            xform_vertex(&S.verts[i+2], &cv[2]);
-            ClipV poly[12];
-            int np = clip_frustum(cv, poly);   /* 6 平面视锥裁剪 */
-#ifdef SP_DEBUG
-            if (np >= 3) {
-                Pv sa; to_screen(&poly[0], &sa);
-                fprintf(stderr, "tri: np=%d A(%.0f,%.0f w=%.3f)", np, sa.sx, sa.sy, sa.wc);
-                for (int k = 1; k < np; k++) {
-                    Pv s; to_screen(&poly[k], &s);
-                    fprintf(stderr, " (%.0f,%.0f w=%.3f)", s.sx, s.sy, s.wc);
-                }
-                fprintf(stderr, "\n");
-            }
-#endif
-            if (np < 3) continue;              /* 完全在相机后 */
-            Pv a, b, c;
-            to_screen(&poly[0], &a);
-            for (int k = 1; k + 1 < np; k++) { /* 扇形三角化（裁剪后最多 4 边形） */
-                to_screen(&poly[k],   &b);
-                to_screen(&poly[k+1], &c);
-                raster_tri(&a, &b, &c);
-            }
+    const struct Vtx* v = S.verts;
+    switch (S.prim_mode) {
+    case SP_POINTS:
+        for (int i = 0; i < n; i++) emit_point(&v[i]);
+        break;
+    case SP_LINES:
+        for (int i = 0; i + 1 < n; i += 2) emit_line(&v[i], &v[i+1]);
+        break;
+    case SP_LINE_STRIP:
+        for (int i = 0; i + 1 < n; i++) emit_line(&v[i], &v[i+1]);
+        break;
+    case SP_TRIANGLES:
+        for (int i = 0; i + 2 < n; i += 3) emit_tri(&v[i], &v[i+1], &v[i+2]);
+        break;
+    case SP_TRIANGLE_STRIP:
+        /* 条带：每 3 个连续顶点一个三角形，奇数位翻转绕序保持 CCW */
+        for (int i = 0; i + 2 < n; i++) {
+            if (i & 1) emit_tri(&v[i+1], &v[i], &v[i+2]);
+            else       emit_tri(&v[i],   &v[i+1], &v[i+2]);
         }
-    } else if (S.prim_mode == SP_LINES) {
-        for (int i = 0; i + 1 < n; i += 2) {
-            ClipV cva, cvb;
-            xform_vertex(&S.verts[i],   &cva);
-            xform_vertex(&S.verts[i+1], &cvb);
-            Pv a, b;
-            to_screen(&cva, &a);
-            to_screen(&cvb, &b);
-            raster_line(&a, &b);
-        }
+        break;
+    case SP_TRIANGLE_FAN:
+        for (int i = 1; i + 1 < n; i++) emit_tri(&v[0], &v[i], &v[i+1]);
+        break;
+    default:
+        break;
     }
     S.vcount = 0;
 }

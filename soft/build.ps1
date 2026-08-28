@@ -13,6 +13,9 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o demo_soft.exe demo_soft.c -L. -lsilsph_soft -luser32 -lgdi32
+& $gcc -O2 -std=c11 -Wall -Wextra -o crop_test.exe crop_test.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o perf_soft.exe perf_soft.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o prim_test.exe prim_test.c -L. -lsilsph_soft
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== OK: silsph_soft.dll / demo_soft.exe =="
