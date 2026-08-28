@@ -9,7 +9,7 @@
 
 # 运行产物
 *.bmp
-*.png
+soft/*.png
 *.log
 silsph_hwnd.txt
 silsph_fps.txt
