@@ -1,3 +1,4 @@
+# (C) SilentStudio — All Rights Reserved. Proprietary license.
 # build.ps1 — 编译 silsph_soft.dll（软件渲染管线）+ demo_soft.exe
 $ErrorActionPreference = "Stop"
 $w64 = "D:\JAVA-Qt\w64devkit\w64devkit\bin"

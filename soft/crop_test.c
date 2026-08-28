@@ -1,9 +1,21 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // crop_test.c — 近平面裁剪验证
 // S1: 三角形穿近平面（1 顶点在相机后）→ 裁剪后应显示被截断的三角形
 // S2: 三角形完全在相机后 → 应 0 像素
 // S3: 三角形完全在相机前 → 应完整显示
 #include "silsph_soft.h"
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static void console_utf8(void) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+}
 
 static long count_drawn(void) {
     int w = 0, h = 0;
@@ -28,6 +40,7 @@ static void scene(const char* name, float ax,float ay,float az, float bx,float b
 }
 
 int main(void) {
+    console_utf8();
     if (!sp_create(960, 640)) { printf("create failed\n"); return 1; }
     sp_viewport(0, 0, 960, 640);
     sp_clear_color(0.063f, 0.075f, 0.102f, 1.0f);

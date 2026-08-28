@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // perf_soft.c — Silsph 软渲染器性能基准（QueryPerformanceCounter 计时）
 // 场景 A：demo 场景（立方体 12 三角 + 网格 34 线）
 // 场景 B：1000 随机三角形（透视投影铺满屏）
@@ -6,6 +8,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+static void console_utf8(void) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+}
 
 static double now_ms(void) { return sp_now_ms(); }  /* 跨平台 */
 
@@ -41,6 +53,7 @@ static void draw_cube(float angle) {
 }
 
 int main(void) {
+    console_utf8();
     if (!sp_create(960, 640)) { printf("create failed\n"); return 1; }
     sp_viewport(0,0,960,640);
     sp_clear_color(0.063f,0.075f,0.102f,1.0f);

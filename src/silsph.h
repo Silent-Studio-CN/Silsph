@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // silsph.h — Silsph Engine v0.1.0 (Win32 + OpenGL 3.3 Core)
 // 纯 C++ 最小 3D 引擎：窗口、渲染上下文、着色器、网格、矩阵
 #pragma once

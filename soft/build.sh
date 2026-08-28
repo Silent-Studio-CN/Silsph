@@ -1,4 +1,5 @@
 #!/bin/sh
+# (C) SilentStudio — All Rights Reserved. Proprietary license.
 # build.sh — Linux/macOS 构建（gcc/clang，零依赖）
 # 产物: libsilsph_soft.so (Linux) / libsilsph_soft.dylib (macOS) + demo/crop/perf
 set -e

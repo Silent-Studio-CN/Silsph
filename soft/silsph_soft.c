@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // silsph_soft.c — Silsph 软件渲染管线（纯 C，零依赖）
 // 管线：顶点变换(MVP) → 图元装配 → 背面剔除 → 光栅化(edge function) → 透视校正插值 → 深度测试
 #include "silsph_soft.h"

@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // main.cpp — Silsph Engine demo：旋转彩色立方体 (Qraft 主题色)
 #include "silsph.h"
 #include <cmath>

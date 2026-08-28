@@ -1,5 +1,8 @@
 # Silsph Engine — v0.1.0
 
+> (C) **SilentStudio** — All Rights Reserved. Proprietary license（私有协议，详见 [LICENSE](LICENSE)）。
+> 仓库公开只读；除 SilentStudio 授权成员外，不接受外部提交。
+
 纯 C++ 最小 3D 引擎（Win32 + OpenGL 3.3 Core），**零第三方依赖**：
 窗口 / WGL 上下文（手写加载器 30 个 GL 函数）/ GLSL shader / VAO-VBO 网格 / 手写 4x4 矩阵。
 

@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // silsph_soft.h — Silsph 软件渲染管线（自研 OPG/VK 同品的第一步）
 // 即时模式 API（迷你 OpenGL 风格）：帧缓冲 → 矩阵 → 图元 → 光栅化
 #ifndef SILSPH_SOFT_H

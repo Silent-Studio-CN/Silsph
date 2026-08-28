@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // silsph.cpp — Silsph Engine v0.1.0 实现
 #include "silsph.h"
 #include <cmath>

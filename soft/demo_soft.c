@@ -1,3 +1,5 @@
+// (C) SilentStudio — All Rights Reserved.
+// Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
 // demo_soft.c — Silsph 软渲染 demo v0.2
 // 1) 硬件信息（sp_sysinfo：CPU/内存/GPU/OS，纯 Win32+注册表）
 // 2) 帧率/画质控制矩阵：分辨率 x 深度/剔除开关 -> ms/帧 -> FPS
@@ -7,6 +9,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+/* 修复 GBK 控制台中文乱码：程序自己声明 UTF-8 输出 */
+static void console_utf8(void) {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+}
 
 static double now_ms(void) { return sp_now_ms(); }  /* 跨平台：DLL 内 QPC/clock_gettime */
 
@@ -176,6 +189,7 @@ static void render_frame(int W, int H, float angle, const char* path) {
 }
 
 int main(void) {
+    console_utf8();
     if (!sp_create(960, 640)) { printf("sp_create failed\n"); return 1; }
     sp_viewport(0, 0, 960, 640);
     sp_clear_color(0.063f, 0.075f, 0.102f, 1.0f);
