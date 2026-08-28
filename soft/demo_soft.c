@@ -1,13 +1,13 @@
 // (C) SilentStudio — All Rights Reserved.
 // Proprietary license: 未经 SilentStudio 书面许可，禁止复制、分发、修改或使用。
-// demo_soft.c — Silsph 软渲染 demo v0.2
-// 1) 硬件信息（sp_sysinfo：CPU/内存/GPU/OS，纯 Win32+注册表）
-// 2) 帧率/画质控制矩阵：分辨率 x 深度/剔除开关 -> ms/帧 -> FPS
-// 3) 帧率控制：限速器（目标 60/30 FPS 实测）
-// 4) 画质证据：6 帧 BMP（与 GL demo 同场景）
+// demo_soft.c — Silsph 软渲染 demo v0.3
+// 默认：实时动画窗口（立方体自转 + 轨道相机，标题栏 FPS）
+// --info   硬件信息 + 帧率/画质矩阵 + 帧限速（控制台）
+// --frames 输出 6 帧 BMP 画质证据（控制台）
 #include "silsph_soft.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #ifdef _WIN32
 #include <windows.h>
@@ -62,7 +62,8 @@ static void lit_color(const float n[3], const float c[3], float angle, float out
     out[0] = c[0]*light; out[1] = c[1]*light; out[2] = c[2]*light;
 }
 
-/* 场景：Qraft 主题立方体 + 16x16 网格 + 轨道相机（与 GL demo 同参数） */
+/* 场景：Qraft 主题立方体 + 16x16 网格 + 轨道相机（与 GL demo 同参数）
+   angle 递增 → 立方体自转(绕Y + 绕X摆动) + 相机绕圈（"元素转圈"） */
 static void draw_scene(int W, int H, float angle) {
     float aspect = (float)W / (float)H;
     sp_matrix_mode(SP_PROJECTION); sp_load_identity();
@@ -104,7 +105,125 @@ static void draw_scene(int W, int H, float angle) {
     sp_end();
 }
 
-/* 基准：渲染 frames 帧（角度递增），返回平均 ms/帧 */
+/* ================= 窗口动画模式（默认，仅 Windows） ================= */
+#ifdef _WIN32
+static const char* kWinClass = "SilsphSoftWindow";
+static HWND g_hwnd = NULL;
+static BITMAPINFO g_bmi;
+static HBITMAP g_dib = NULL;
+static void* g_dib_bits = NULL;
+static HDC g_memdc = NULL;
+static int g_running = 1;
+
+static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+    case WM_DESTROY: g_running = 0; PostQuitMessage(0); return 0;
+    case WM_KEYDOWN:
+        if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
+        break;
+    }
+    return DefWindowProcA(hwnd, msg, wp, lp);
+}
+
+static void window_init(int w, int h) {
+    WNDCLASSA wc;
+    memset(&wc, 0, sizeof(wc));
+    wc.lpfnWndProc = wnd_proc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = kWinClass;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    RegisterClassA(&wc);
+    RECT rc = {0, 0, w, h};
+    AdjustWindowRect(&rc, WS_OVERLAPPEDWINDOW, FALSE);
+    g_hwnd = CreateWindowA(kWinClass, "Silsph Soft Renderer",
+                           WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                           rc.right - rc.left, rc.bottom - rc.top,
+                           NULL, NULL, wc.hInstance, NULL);
+    ShowWindow(g_hwnd, SW_SHOW);
+    UpdateWindow(g_hwnd);
+    /* DIB section：帧缓冲内存序 B,G,R,A 与 32bpp BI_RGB 完全匹配，零转换直接 blit */
+    memset(&g_bmi, 0, sizeof(g_bmi));
+    g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    g_bmi.bmiHeader.biWidth = w;
+    g_bmi.bmiHeader.biHeight = -h;   /* top-down：帧缓冲行 0 = 窗口顶行 */
+    g_bmi.bmiHeader.biPlanes = 1;
+    g_bmi.bmiHeader.biBitCount = 32;
+    g_bmi.bmiHeader.biCompression = BI_RGB;
+    g_dib = CreateDIBSection(NULL, &g_bmi, DIB_RGB_COLORS, &g_dib_bits, NULL, 0);
+    HDC hdc = GetDC(g_hwnd);
+    g_memdc = CreateCompatibleDC(hdc);
+    ReleaseDC(g_hwnd, hdc);
+    SelectObject(g_memdc, g_dib);
+}
+
+static void window_blit(int w, int h) {
+    memcpy(g_dib_bits, sp_pixels(NULL, NULL), (size_t)w * h * 4);
+    HDC hdc = GetDC(g_hwnd);
+    BitBlt(hdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
+    ReleaseDC(g_hwnd, hdc);
+}
+
+static void window_mode(void) {
+    const int W = 960, H = 640;
+    if (!sp_create(W, H)) { printf("sp_create failed\n"); return; }
+    sp_viewport(0, 0, W, H);
+    sp_clear_color(0.063f, 0.075f, 0.102f, 1.0f);
+    window_init(W, H);
+
+    double t0 = now_ms();
+    double angle = 0.0;
+    int frames = 0;
+    double fps_t0 = t0;
+    MSG msg;
+    printf("Silsph Soft Renderer 窗口已打开（ESC/关闭退出）\n");
+    while (g_running) {
+        while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        if (!g_running) break;
+        double now = now_ms();
+        angle += (now - t0) / 1000.0 * 1.2;   /* 与 GL demo 同速 */
+        t0 = now;
+        sp_clear(SP_COLOR | SP_DEPTH);
+        draw_scene(W, H, (float)angle);
+        window_blit(W, H);
+        frames++;
+        if (now - fps_t0 >= 500.0) {
+            double fps = frames * 1000.0 / (now - fps_t0);
+            char buf[160];
+            sprintf(buf, "Silsph Soft Renderer - %dx%d | %.1f FPS", W, H, fps);
+            SetWindowTextA(g_hwnd, buf);
+            FILE* fp = fopen("silsph_fps.txt", "w");
+            if (fp) { fprintf(fp, "%.1f", fps); fclose(fp); }
+            frames = 0; fps_t0 = now;
+        }
+    }
+    DeleteObject(g_dib);
+    DeleteDC(g_memdc);
+    sp_destroy();
+    printf("silsph soft demo exit\n");
+}
+#endif /* _WIN32 */
+
+/* ================= 控制台模式 ================= */
+static long count_drawn(const unsigned char* px, int w, int h) {
+    const uint32_t bg = 0xFF10131Au;
+    long n = 0;
+    for (long i = 0; i < (long)w * h; i++)
+        if (((const uint32_t*)px)[i] != bg) n++;
+    return n;
+}
+
+static void render_frame(int W, int H, float angle, const char* path) {
+    sp_clear(SP_COLOR | SP_DEPTH);
+    draw_scene(W, H, angle);
+    int w = 0, h = 0;
+    const unsigned char* px = sp_pixels(&w, &h);
+    write_bmp(path, (const uint32_t*)px, w, h);
+    printf("%s: 非背景像素 = %ld\n", path, count_drawn(px, w, h));
+}
+
 static double bench(int W, int H, int depth, int cull, int frames) {
     sp_depth_test(depth);
     sp_cull_face(cull);
@@ -116,7 +235,6 @@ static double bench(int W, int H, int depth, int cull, int frames) {
     return (now_ms() - t0) / frames;
 }
 
-/* 重度 overdraw 基准：300 随机三角形（一半背面、大量重叠） */
 #define NTRIS 300
 static float tri_buf[NTRIS][9];
 static void gen_tris(void) {
@@ -152,7 +270,6 @@ static double bench_tris(int depth, int cull, int frames) {
     return (now_ms() - t0) / frames;
 }
 
-/* 帧限速器：目标 fps，跑 seconds 秒，返回实际 fps */
 static double frame_limit_bench(double target_fps, int seconds) {
     double frame_ms = 1000.0 / target_fps;
     double next = now_ms();
@@ -166,39 +283,20 @@ static double frame_limit_bench(double target_fps, int seconds) {
         next += frame_ms;
         double wait = next - now_ms();
         if (wait > 0.1) sp_sleep_ms(wait);
-        else next = now_ms() + frame_ms;   /* 落后：重置相位 */
+        else next = now_ms() + frame_ms;
     }
     return (double)frames * 1000.0 / (now_ms() - t0);
 }
 
-static long count_drawn(const unsigned char* px, int w, int h) {
-    const uint32_t bg = 0xFF10131Au;
-    long n = 0;
-    for (long i = 0; i < (long)w * h; i++)
-        if (((const uint32_t*)px)[i] != bg) n++;
-    return n;
-}
-
-static void render_frame(int W, int H, float angle, const char* path) {
-    sp_clear(SP_COLOR | SP_DEPTH);
-    draw_scene(W, H, angle);
-    int w = 0, h = 0;
-    const unsigned char* px = sp_pixels(&w, &h);
-    write_bmp(path, (const uint32_t*)px, w, h);
-    printf("%s: 非背景像素 = %ld\n", path, count_drawn(px, w, h));
-}
-
-int main(void) {
-    console_utf8();
-    if (!sp_create(960, 640)) { printf("sp_create failed\n"); return 1; }
+/* --info：硬件信息 + 帧率/画质矩阵 + 帧限速 */
+static void console_info(void) {
+    if (!sp_create(960, 640)) { printf("sp_create failed\n"); return; }
     sp_viewport(0, 0, 960, 640);
     sp_clear_color(0.063f, 0.075f, 0.102f, 1.0f);
-    gen_tris();
 
-    /* ---- 1) 硬件信息 ---- */
     sp_sysinfo si;
     if (sp_get_sysinfo(&si)) {
-        printf("==== 硬件信息（sp_sysinfo，纯 Win32+注册表，零依赖）====\n");
+        printf("==== 硬件信息（sp_get_sysinfo，纯系统 API，零依赖）====\n");
         printf("CPU : %s\n", si.cpu_name);
         printf("       %d 核心 / %d 线程, %d MHz\n", si.cpu_cores, si.cpu_threads, si.cpu_mhz);
         printf("内存: %llu MB (可用 %llu MB)\n", si.mem_total_mb, si.mem_avail_mb);
@@ -209,7 +307,6 @@ int main(void) {
         printf("OS  : Windows %d.%d (build %d)\n", si.os_major, si.os_minor, si.os_build);
     }
 
-    /* ---- 2) 帧率/画质控制矩阵 ---- */
     printf("\n==== 帧率/画质控制（各渲染 1000 帧取平均）====\n");
     printf("%-26s %9s %8s\n", "配置", "ms/帧", "FPS");
     struct { int w, h, depth, cull; const char* name; } cfgs[] = {
@@ -223,7 +320,6 @@ int main(void) {
         printf("%-26s %9.3f %8.0f\n", cfgs[i].name, ms, 1000.0 / ms);
     }
 
-    /* ---- 2.5) 重度 overdraw：画质开关的真实价值 ---- */
     printf("\n==== 画质开关真实价值（300 随机三角形重度重叠，各 500 帧）====\n");
     printf("%-26s %9s %8s\n", "配置", "ms/帧", "FPS");
     struct { int depth, cull; const char* name; } tc[] = {
@@ -232,28 +328,50 @@ int main(void) {
         {1, 0, "剔除关"},
         {0, 0, "全关"},
     };
+    gen_tris();
+    sp_matrix_mode(SP_PROJECTION); sp_load_identity();
+    sp_perspective(55.0f, 960.0f/640.0f, 0.1f, 100.0f);
+    sp_matrix_mode(SP_MODELVIEW); sp_load_identity();
+    sp_look_at(0, 0, 6, 0, 0, 0, 0, 1, 0);
+    sp_color3f(1.0f, 0.55f, 0.35f);
     for (int i = 0; i < 4; i++) {
         double ms = bench_tris(tc[i].depth, tc[i].cull, 500);
         printf("%-26s %9.3f %8.0f\n", tc[i].name, ms, 1000.0 / ms);
     }
 
-    /* ---- 3) 帧率控制（限速器） ---- */
     printf("\n==== 帧率控制（限速器实测 1 秒）====\n");
-    double f60 = frame_limit_bench(60.0, 1);
-    double f30 = frame_limit_bench(30.0, 1);
-    printf("目标 60 FPS -> 实际 %.2f FPS\n", f60);
-    printf("目标 30 FPS -> 实际 %.2f FPS\n", f30);
+    printf("目标 60 FPS -> 实际 %.2f FPS\n", frame_limit_bench(60.0, 1));
+    printf("目标 30 FPS -> 实际 %.2f FPS\n", frame_limit_bench(30.0, 1));
 
-    /* ---- 4) 画质证据：6 帧 BMP（全开画质） ---- */
-    sp_depth_test(1); sp_cull_face(1);
-    printf("\n==== 画质证据（6 帧 BMP，与 GL demo 同场景）====\n");
+    sp_destroy();
+}
+
+/* --frames：6 帧 BMP 画质证据 */
+static void console_frames(void) {
+    if (!sp_create(960, 640)) { printf("sp_create failed\n"); return; }
+    sp_viewport(0, 0, 960, 640);
+    sp_clear_color(0.063f, 0.075f, 0.102f, 1.0f);
     for (int i = 0; i < 6; i++) {
         char name[32];
         sprintf(name, "frame%d.bmp", i);
         render_frame(960, 640, (float)i, name);
     }
-
     sp_destroy();
-    printf("demo_soft done\n");
+}
+
+int main(int argc, char** argv) {
+    console_utf8();
+    int mode = 0;
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--info") == 0) mode = 1;
+        else if (strcmp(argv[i], "--frames") == 0) mode = 2;
+    }
+    if (mode == 1) { console_info(); return 0; }
+    if (mode == 2) { console_frames(); return 0; }
+#ifdef _WIN32
+    window_mode();   /* 默认：实时动画窗口 */
+#else
+    console_info();  /* 非 Windows 回退控制台模式 */
+#endif
     return 0;
 }

@@ -58,10 +58,13 @@
 **Windows**（需 w64devkit / MinGW gcc）：
 ```
 soft\build.ps1
-soft\demo_soft.exe      # 硬件信息 + 帧率/画质矩阵 + 帧限速 + 6 帧 BMP
-soft\crop_test.exe      # 近平面裁剪验证
-soft\perf_soft.exe      # 性能基准
+soft\demo_soft.exe             # 默认：实时动画窗口（立方体自转 + 轨道相机，标题栏 FPS，ESC 退出）
+soft\demo_soft.exe --info      # 硬件信息 + 帧率/画质矩阵 + 帧限速（控制台）
+soft\demo_soft.exe --frames    # 输出 6 帧 BMP 画质证据（控制台）
+soft\crop_test.exe             # 近平面裁剪验证
+soft\perf_soft.exe             # 性能基准
 ```
+主目录 `silsph_demo.exe` 即软渲染 demo（窗口模式）；旧 GL 版为 `silsph_demo_gl.exe`。
 
 **Linux / macOS**（gcc/clang）：
 ```

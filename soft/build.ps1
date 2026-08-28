@@ -12,7 +12,7 @@ Write-Host "== 1/2 编译 silsph_soft.dll =="
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== 2/2 编译 demo_soft.exe =="
-& $gcc -O2 -std=c11 -Wall -Wextra -o demo_soft.exe demo_soft.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o demo_soft.exe demo_soft.c -L. -lsilsph_soft -luser32 -lgdi32
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== OK: silsph_soft.dll / demo_soft.exe =="
