@@ -65,6 +65,7 @@ SP_API void sp_tex_filter(int mode);      /* SP_TEX_NEAREST / SP_TEX_LINEAR */
 SP_API void sp_tex_wrap(int mode);        /* SP_TEX_REPEAT / SP_TEX_CLAMP */
 
 /* ---- 画质控制 ---- */
+SP_API void sp_blend(int enable);      /* alpha 混合（src_alpha / 1-src_alpha，默认关） */
 SP_API void sp_cull_face(int enable);   /* 背面剔除（默认开，1=开） */
 SP_API void sp_depth_test(int enable);  /* 深度测试与写入（默认开，1=开） */
 

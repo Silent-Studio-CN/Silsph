@@ -110,6 +110,7 @@ static struct {
     int      vcount;
     int      cull_enable;    /* 背面剔除开关 */
     int      depth_enable;   /* 深度测试开关 */
+    int      blend_enable;   /* alpha 混合开关 */
     float    cur_r, cur_g, cur_b;
     float    cur_u, cur_v;   /* 当前纹理坐标 */
     int      cur_tex;        /* 当前纹理 ID（0 = 无纹理） */
@@ -142,10 +143,15 @@ static void to_screen(const ClipV* c, Pv* o) {
     o->u = c->u; o->v = c->v;
 }
 
-/* Sutherland-Hodgman：对近平面裁剪（clip 空间 f(p) = p.z + p.w >= 0，即视空间 z >= -near）。
+/* Sutherland-Hodgman 视锥裁剪（6 平面：x±w、y±w、z±w 近/远）。
    注意：不能裁剪 w=0 平面——交点 w≈0 会投影到 ±1e6 坐标，edge function 浮点精度崩溃；
-   近平面交点 w = near（几何上 = near 处），数值稳定，且近平面在相机前，自动覆盖相机后顶点。 */
-static float fclip(const ClipV* p) { return p->z + p->w; }
+   近平面的交点 w = near（几何上 = near 处），数值稳定，且近平面在相机前，自动覆盖相机后顶点。 */
+static float fclip_xm(const ClipV* p) { return p->x + p->w; }
+static float fclip_xp(const ClipV* p) { return p->w - p->x; }
+static float fclip_ym(const ClipV* p) { return p->y + p->w; }
+static float fclip_yp(const ClipV* p) { return p->w - p->y; }
+static float fclip_zm(const ClipV* p) { return p->z + p->w; }
+static float fclip_zp(const ClipV* p) { return p->w - p->z; }
 static ClipV lerp_v(const ClipV* a, const ClipV* b, float t) {
     ClipV o;
     o.x = a->x + (b->x - a->x) * t;
@@ -159,14 +165,15 @@ static ClipV lerp_v(const ClipV* a, const ClipV* b, float t) {
     o.v = a->v + (b->v - a->v) * t;
     return o;
 }
-static void clip_near(const ClipV in[3], ClipV out[6], int* nout) {
+/* 单平面裁剪：凸多边形 in[nin] -> out（in/out 不得重叠） */
+static int clip_plane(const ClipV* in, int nin, ClipV* out, float (*f)(const ClipV*)) {
     int n = 0;
-    const ClipV* prev = &in[2];
-    float fprev = fclip(prev);
+    const ClipV* prev = &in[nin - 1];
+    float fprev = f(prev);
     int prev_in = fprev >= 0.0f;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < nin; i++) {
         const ClipV* cur = &in[i];
-        float fcur = fclip(cur);
+        float fcur = f(cur);
         int cur_in = fcur >= 0.0f;
         if (cur_in) {
             if (!prev_in) /* 进入：插值交点 f=0 */
@@ -176,10 +183,35 @@ static void clip_near(const ClipV in[3], ClipV out[6], int* nout) {
             out[n++] = lerp_v(prev, cur, -fprev / (fcur - fprev));
         prev = cur; fprev = fcur; prev_in = cur_in;
     }
-    *nout = n;
+    return n;
+}
+/* 完整视锥裁剪（6 平面），凸三角形 -> 至多 9 顶点凸多边形 */
+static int clip_frustum(const ClipV in[3], ClipV out[12]) {
+    /* 快速路径：三个顶点全在视锥内 → 免裁剪（常见情况，零开销） */
+    int all_in = 1;
+    for (int i = 0; i < 3 && all_in; i++) {
+        const ClipV* p = &in[i];
+        if (p->x + p->w < 0.0f || p->w - p->x < 0.0f ||
+            p->y + p->w < 0.0f || p->w - p->y < 0.0f ||
+            p->z + p->w < 0.0f || p->w - p->z < 0.0f)
+            all_in = 0;
+    }
+    if (all_in) { memcpy(out, in, 3 * sizeof(ClipV)); return 3; }
+    ClipV buf[12];
+    int n = 3;
+    memcpy(buf, in, 3 * sizeof(ClipV));
+    n = clip_plane(buf, n, out, fclip_xm); if (n < 3) return 0;
+    n = clip_plane(out, n, buf, fclip_xp); if (n < 3) return 0;
+    n = clip_plane(buf, n, out, fclip_ym); if (n < 3) return 0;
+    n = clip_plane(out, n, buf, fclip_yp); if (n < 3) return 0;
+    n = clip_plane(buf, n, out, fclip_zm); if (n < 3) return 0;
+    n = clip_plane(out, n, buf, fclip_zp);
+    if (n < 3) return 0;
+    memcpy(out, buf, (size_t)n * sizeof(ClipV));
+    return n;
 }
 
-static void put_pixel(int x, int y_up, float zndc, float r, float g, float b) {
+static void put_pixel(int x, int y_up, float zndc, float r, float g, float b, float a) {
     if (x < S.vp_x || x >= S.vp_x + S.vp_w) return;
     if (y_up < S.vp_y || y_up >= S.vp_y + S.vp_h) return;
     int row = S.height - 1 - y_up;          /* 窗口 y 向上 -> 帧缓冲行（顶行=0） */
@@ -187,6 +219,16 @@ static void put_pixel(int x, int y_up, float zndc, float r, float g, float b) {
     if (S.depth_enable) {
         if (zndc >= *d) return;             /* 深度测试 LESS */
         *d = zndc;
+    }
+    uint32_t* px = &S.color[row * S.width + x];
+    if (S.blend_enable && a < 1.0f) {       /* alpha 混合：src_alpha / 1-src_alpha */
+        uint32_t dst = *px;
+        float dr = (float)((dst >> 16) & 0xFF) / 255.0f;
+        float dg = (float)((dst >> 8)  & 0xFF) / 255.0f;
+        float db = (float)(dst & 0xFF) / 255.0f;
+        r = r * a + dr * (1.0f - a);
+        g = g * a + dg * (1.0f - a);
+        b = b * a + db * (1.0f - a);
     }
     uint32_t ri = (uint32_t)((r < 0 ? 0 : (r > 1 ? 1 : r)) * 255.0f);
     uint32_t gi = (uint32_t)((g < 0 ? 0 : (g > 1 ? 1 : g)) * 255.0f);
@@ -196,7 +238,7 @@ static void put_pixel(int x, int y_up, float zndc, float r, float g, float b) {
 
 static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
                        float b0, float b1, float b2, float iw,
-                       float* r, float* g, float* bb);
+                       float* r, float* g, float* bb, float* al);
 
 /* ================= 光栅化：三角形（edge function + 重心坐标 + 透视校正） ================= */
 static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
@@ -228,15 +270,15 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
             if (denom <= 0.0f) continue;
             float zndc = (b0 * a->zc + b1 * b->zc + b2 * c->zc) / denom;
             float iw = b0 / a->wc + b1 / b->wc + b2 / c->wc;
-            float r, g, bb;
+            float r, g, bb, al = 1.0f;
             if (S.cur_tex > 0 && S.cur_tex <= SP_MAX_TEX && texs[S.cur_tex-1].rgba) {
-                sample_tex(a, b, c, b0, b1, b2, iw, &r, &g, &bb);
+                sample_tex(a, b, c, b0, b1, b2, iw, &r, &g, &bb, &al);
             } else {
                 r = (b0 * a->r / a->wc + b1 * b->r / b->wc + b2 * c->r / c->wc) / iw;
                 g = (b0 * a->g / a->wc + b1 * b->g / b->wc + b2 * c->g / c->wc) / iw;
                 bb = (b0 * a->b / a->wc + b1 * b->b / b->wc + b2 * c->b / c->wc) / iw;
             }
-            put_pixel(x, y, zndc, r, g, bb);
+            put_pixel(x, y, zndc, r, g, bb, al);
         }
     }
 }
@@ -257,7 +299,7 @@ static void texel_rgba(const Tex* t, int x, int y, float out[4]) {
 /* 透视校正插值 UV 并采样；输出 = 纹素色 × 顶点光照色（GL 语义 frag = texel * light） */
 static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
                        float b0, float b1, float b2, float iw,
-                       float* r, float* g, float* bb) {
+                       float* r, float* g, float* bb, float* al) {
     float u = (b0*a->u/a->wc + b1*b->u/b->wc + b2*c->u/c->wc) / iw;
     float v = (b0*a->v/a->wc + b1*b->v/b->wc + b2*c->v/c->wc) / iw;
     float vr = (b0*a->r/a->wc + b1*b->r/b->wc + b2*c->r/c->wc) / iw;  /* 顶点光照色 */
@@ -278,13 +320,16 @@ static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
         texel_rgba(t, x0+1, y0+1, c11);
         float tr = c00[0]*(1-tx) + c10[0]*tx, tg = c00[1]*(1-tx) + c10[1]*tx, tb = c00[2]*(1-tx) + c10[2]*tx;
         float br = c01[0]*(1-tx) + c11[0]*tx, bg = c01[1]*(1-tx) + c11[1]*tx, bb2 = c01[2]*(1-tx) + c11[2]*tx;
+        float ta = c00[3]*(1-tx) + c10[3]*tx, ba = c01[3]*(1-tx) + c11[3]*tx;
         *r = (tr*(1-ty) + br*ty) * vr;
         *g = (tg*(1-ty) + bg*ty) * vg;
         *bb = (tb*(1-ty) + bb2*ty) * vb;
+        *al = ta*(1-ty) + ba*ty;
     } else {
         float tc[4];
         texel_rgba(t, (int)floorf(fx + 0.5f), (int)floorf(fy + 0.5f), tc);
         *r = tc[0] * vr; *g = tc[1] * vg; *bb = tc[2] * vb;
+        *al = tc[3];
     }
 }
 
@@ -302,7 +347,7 @@ static void raster_line(const Pv* a, const Pv* b) {
         float g = a->g + (b->g - a->g) * t;
         float bb = a->b + (b->b - a->b) * t;
         if (wc <= 0.0f) continue;
-        put_pixel((int)x, (int)y, zc / wc, r, g, bb);
+        put_pixel((int)x, (int)y, zc / wc, r, g, bb, 1.0f);
     }
 }
 
@@ -320,11 +365,12 @@ SP_API int sp_create(int width, int height) {
     S.cur_u = S.cur_v = 0.0f;
     S.cur_tex = 0;
     S.prim_mode = SP_TRIANGLES; S.vcount = 0;
-    S.cull_enable = 1; S.depth_enable = 1;
+    S.cull_enable = 1; S.depth_enable = 1; S.blend_enable = 0;
     return 1;
 }
 SP_API void sp_cull_face(int enable) { S.cull_enable = enable ? 1 : 0; }
 SP_API void sp_depth_test(int enable) { S.depth_enable = enable ? 1 : 0; }
+SP_API void sp_blend(int enable) { S.blend_enable = enable ? 1 : 0; }
 
 /* ================= 纹理 API ================= */
 SP_API int sp_gen_texture(int w, int h, const unsigned char* rgba) {
@@ -632,8 +678,8 @@ SP_API void sp_end(void) {
             xform_vertex(&S.verts[i],   &cv[0]);
             xform_vertex(&S.verts[i+1], &cv[1]);
             xform_vertex(&S.verts[i+2], &cv[2]);
-            ClipV poly[6]; int np = 0;
-            clip_near(cv, poly, &np);          /* 近平面（w）裁剪 */
+            ClipV poly[12];
+            int np = clip_frustum(cv, poly);   /* 6 平面视锥裁剪 */
 #ifdef SP_DEBUG
             if (np >= 3) {
                 Pv sa; to_screen(&poly[0], &sa);

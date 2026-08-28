@@ -22,6 +22,8 @@
 ### Silsph Soft Renderer（纯 C 软件渲染管线）
 - **完整管线**：MVP 变换 → 近平面裁剪（Sutherland-Hodgman）→ 背面剔除 → edge-function 光栅化 → 透视校正插值（颜色/深度）→ 深度测试（LESS）→ RGBA8 帧缓冲
 - **纹理系统**：RGBA8 2D 纹理（`sp_gen_texture`/`sp_bind_texture`/`sp_texcoord2f`），最近邻/双线性过滤、repeat/clamp 环绕、透视校正 UV 插值、纹素色 × 光照（GL 语义 frag = texel × light）
+- **混合/透明**：alpha 混合（`sp_blend`，src_alpha / 1-src_alpha，纹理 alpha 通道）
+- **完整视锥裁剪**：6 平面 Sutherland-Hodgman（x±w / y±w / z±w 近远），快速路径免裁剪，视锥外几何零开销
 - **画质控制**：深度测试 / 背面剔除开关（`sp_depth_test` / `sp_cull_face`）
 - **帧率控制**：限速器实测 60→59.5 FPS、30→29.7 FPS（`sp_sleep_ms`）
 - **硬件信息**：CPU 品牌/核心/主频、内存、GPU 名称/显存、OS 版本（`sp_get_sysinfo`，纯系统 API）

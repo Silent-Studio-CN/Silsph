@@ -62,6 +62,23 @@ static void lit_color(const float n[3], const float c[3], float angle, float out
     out[0] = c[0]*light; out[1] = c[1]*light; out[2] = c[2]*light;
 }
 
+/* 半透明棋盘格纹理（alpha=128，混合演示） */
+static int g_tex_half = 0;
+static void init_half_texture(void) {
+    const int W = 64, H = 64;
+    unsigned char* px = (unsigned char*)malloc((size_t)W * H * 4);
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            int c = ((x / 16) + (y / 16)) & 1;
+            unsigned char* p = px + ((size_t)y * W + x) * 4;
+            if (c) { p[0]=255; p[1]=255; p[2]=255; }
+            else   { p[0]=16;  p[1]=19;  p[2]=26; }
+            p[3] = 128;   /* 半透明 */
+        }
+    g_tex_half = sp_gen_texture(W, H, px);
+    free(px);
+}
+
 /* 棋盘格纹理（Qraft 青/深底，8px 格）：懒初始化 */
 static int g_tex_checker = 0;
 static void init_checker_texture(void) {
@@ -123,6 +140,20 @@ static void draw_scene(int W, int H, float angle) {
         sp_texcoord2f(uv[2][0],uv[2][1]); sp_vertex3f(v[2][0],v[2][1],v[2][2]);
         sp_end();
     }
+    /* 半透明板：立在立方体前方 z=2.5，混合后面景物（painter：不透明先画，透明后画） */
+    if (!g_tex_half) init_half_texture();
+    sp_blend(1);
+    sp_bind_texture(g_tex_half);
+    sp_color3f(1.0f, 1.0f, 1.0f);   /* 光照色=白：板色=纹理色 */
+    sp_begin(SP_TRIANGLES);
+    sp_texcoord2f(0,0); sp_vertex3f(-1.5f, -1.5f, 2.5f);
+    sp_texcoord2f(1,0); sp_vertex3f( 1.5f, -1.5f, 2.5f);
+    sp_texcoord2f(1,1); sp_vertex3f( 1.5f,  1.5f, 2.5f);
+    sp_texcoord2f(0,0); sp_vertex3f(-1.5f, -1.5f, 2.5f);
+    sp_texcoord2f(0,1); sp_vertex3f(-1.5f,  1.5f, 2.5f);
+    sp_texcoord2f(1,1); sp_vertex3f( 1.5f,  1.5f, 2.5f);
+    sp_end();
+    sp_blend(0);
     sp_bind_texture(0);   /* 网格线纯色 */
     sp_color3f(0.35f, 0.40f, 0.55f);
     sp_begin(SP_LINES);
