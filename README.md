@@ -26,6 +26,7 @@
 - **完整视锥裁剪**：6 平面 Sutherland-Hodgman（x±w / y±w / z±w 近远），快速路径免裁剪，视锥外几何零开销
 - **正交投影 + 图元扩展**：`sp_ortho`；三角形条带/扇（`SP_TRIANGLE_STRIP/FAN`）、点（`SP_POINTS`）、线带（`SP_LINE_STRIP`）
 - **场景图/变换层级**：MODELVIEW 矩阵栈（`sp_push_matrix`/`sp_pop_matrix`，深 16）+ `sp_translate`/`sp_scale`，父子变换（太阳-地球-月亮验证）
+- **资源加载**（`silsph_res.h`）：OBJ 模型（`sp_load_obj`：v/vt/vn/f、四边形拆分、材质名）+ BMP 纹理（`sp_load_texture_bmp` 24/32bpp）——零依赖
 - **画质控制**：深度测试 / 背面剔除开关（`sp_depth_test` / `sp_cull_face`）
 - **帧率控制**：限速器实测 60→59.5 FPS、30→29.7 FPS（`sp_sleep_ms`）
 - **硬件信息**：CPU 品牌/核心/主频、内存、GPU 名称/显存、OS 版本（`sp_get_sysinfo`，纯系统 API）

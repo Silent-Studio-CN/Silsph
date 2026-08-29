@@ -8,7 +8,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
 
 Write-Host "== 1/2 编译 silsph_soft.dll =="
-& $gcc -O2 -std=c11 -Wall -Wextra -DSP_BUILD_DLL -shared -o silsph_soft.dll silsph_soft.c -ladvapi32 "-Wl,--out-implib,silsph_soft.dll.a"
+& $gcc -O2 -std=c11 -Wall -Wextra -DSP_BUILD_DLL -shared -o silsph_soft.dll silsph_soft.c silsph_res.c -ladvapi32 "-Wl,--out-implib,silsph_soft.dll.a"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== 2/2 编译 demo_soft.exe =="
@@ -17,6 +17,8 @@ Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o perf_soft.exe perf_soft.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o prim_test.exe prim_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o scene_test.exe scene_test.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o obj_test.exe obj_test.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o bmp_test.exe bmp_test.c -L. -lsilsph_soft
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== OK: silsph_soft.dll / demo_soft.exe =="
