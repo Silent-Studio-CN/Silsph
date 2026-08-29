@@ -83,6 +83,7 @@ static void init_half_texture(void) {
 static int g_pick_mode = 0;
 static int g_pick_req = 0;
 static int g_pick_x = 0, g_pick_y = 0;
+static int g_selected = 0;   /* 当前选中物体 ID（0=无） */
 
 /* 棋盘格纹理（Qraft 青/深底，8px 格）：懒初始化 */
 static int g_tex_checker = 0;
@@ -168,6 +169,70 @@ static void draw_scene(int W, int H, float angle) {
     for (float x = -8.0f; x <= 8.0f; x += 1.0f) { sp_vertex3f(x,0,-8); sp_vertex3f(x,0,8); }
     for (float z = -8.0f; z <= 8.0f; z += 1.0f) { sp_vertex3f(-8,0,z); sp_vertex3f(8,0,z); }
     sp_end();
+
+    /* 选中编辑辅助：描边 + Gizmo（在模型矩阵下绘制，跟随旋转） */
+    if (g_selected == 1) {
+        draw_cube_outline();
+        draw_gizmo();
+    } else if (g_selected == 2) {
+        sp_push_matrix();
+        sp_translate(0, 0, 2.5f);
+        draw_gizmo();
+        sp_pop_matrix();
+    }
+}
+
+/* 立方体 12 条边（选中描边用）：8 顶点索引 */
+static const int CUBE_EDGES[12][2] = {
+    {0,1},{1,2},{2,3},{3,0},   /* 底 */
+    {4,5},{5,6},{6,7},{7,4},   /* 顶 */
+    {0,4},{1,5},{2,6},{3,7},   /* 竖 */
+};
+static void draw_cube_outline(void) {
+    static const float cv[8][3] = {
+        {-1,-1,-1},{1,-1,-1},{1,-1,1},{-1,-1,1},
+        {-1,1,-1},{1,1,-1},{1,1,1},{-1,1,1}};
+    sp_bind_texture(0);
+    sp_color3f(1.0f, 0.9f, 0.2f);   /* 亮黄描边 */
+    sp_begin(SP_LINES);
+    for (int i = 0; i < 12; i++) {
+        sp_vertex3f(cv[CUBE_EDGES[i][0]][0], cv[CUBE_EDGES[i][0]][1], cv[CUBE_EDGES[i][0]][2]);
+        sp_vertex3f(cv[CUBE_EDGES[i][1]][0], cv[CUBE_EDGES[i][1]][1], cv[CUBE_EDGES[i][1]][2]);
+    }
+    sp_end();
+}
+
+/* 坐标轴 Gizmo：X 红 / Y 绿 / Z 蓝，轴长 1.8 + 末端锥形箭头，always-on-top（关深度） */
+static void draw_gizmo(void) {
+    sp_depth_test(0);
+    sp_cull_face(0);
+    sp_bind_texture(0);
+    /* 三条轴 */
+    sp_begin(SP_LINES);
+    sp_color3f(1.0f, 0.30f, 0.30f); sp_vertex3f(0,0,0); sp_vertex3f(1.8f,0,0);
+    sp_color3f(0.30f, 1.0f, 0.30f); sp_vertex3f(0,0,0); sp_vertex3f(0,1.8f,0);
+    sp_color3f(0.30f, 0.50f, 1.0f); sp_vertex3f(0,0,0); sp_vertex3f(0,0,1.8f);
+    sp_end();
+    /* 箭头锥体（轴末端） */
+    sp_begin(SP_TRIANGLES);
+    sp_color3f(1.0f, 0.30f, 0.30f);   /* X 锥 */
+    sp_vertex3f(2.4f,0,0);   sp_vertex3f(1.7f, 0.12f, 0.12f); sp_vertex3f(1.7f,-0.12f, 0.12f);
+    sp_vertex3f(2.4f,0,0);   sp_vertex3f(1.7f,-0.12f, 0.12f); sp_vertex3f(1.7f,-0.12f,-0.12f);
+    sp_vertex3f(2.4f,0,0);   sp_vertex3f(1.7f,-0.12f,-0.12f); sp_vertex3f(1.7f, 0.12f,-0.12f);
+    sp_vertex3f(2.4f,0,0);   sp_vertex3f(1.7f, 0.12f,-0.12f); sp_vertex3f(1.7f, 0.12f, 0.12f);
+    sp_color3f(0.30f, 1.0f, 0.30f);   /* Y 锥 */
+    sp_vertex3f(0,2.4f,0);   sp_vertex3f( 0.12f,1.7f, 0.12f); sp_vertex3f(-0.12f,1.7f, 0.12f);
+    sp_vertex3f(0,2.4f,0);   sp_vertex3f(-0.12f,1.7f, 0.12f); sp_vertex3f(-0.12f,1.7f,-0.12f);
+    sp_vertex3f(0,2.4f,0);   sp_vertex3f(-0.12f,1.7f,-0.12f); sp_vertex3f( 0.12f,1.7f,-0.12f);
+    sp_vertex3f(0,2.4f,0);   sp_vertex3f( 0.12f,1.7f,-0.12f); sp_vertex3f( 0.12f,1.7f, 0.12f);
+    sp_color3f(0.30f, 0.50f, 1.0f);   /* Z 锥 */
+    sp_vertex3f(0,0,2.4f);   sp_vertex3f( 0.12f, 0.12f,1.7f); sp_vertex3f(-0.12f, 0.12f,1.7f);
+    sp_vertex3f(0,0,2.4f);   sp_vertex3f(-0.12f, 0.12f,1.7f); sp_vertex3f(-0.12f,-0.12f,1.7f);
+    sp_vertex3f(0,0,2.4f);   sp_vertex3f(-0.12f,-0.12f,1.7f); sp_vertex3f( 0.12f,-0.12f,1.7f);
+    sp_vertex3f(0,0,2.4f);   sp_vertex3f( 0.12f,-0.12f,1.7f); sp_vertex3f( 0.12f, 0.12f,1.7f);
+    sp_end();
+    sp_cull_face(1);
+    sp_depth_test(1);
 }
 
 /* ================= 窗口动画模式（默认，仅 Windows） ================= */
@@ -262,8 +327,10 @@ static void window_mode(void) {
             draw_scene(W, H, (float)angle);
             g_pick_mode = 0;
             int id = sp_pick_id(g_pick_x, g_pick_y);
-            printf("拾取 (%d,%d) -> ID %d (%s)\n", g_pick_x, g_pick_y, id,
-                   id == 1 ? "立方体" : (id == 2 ? "半透明板" : "无"));
+            g_selected = id;
+            printf("拾取 (%d,%d) -> ID %d (%s) %s\n", g_pick_x, g_pick_y, id,
+                   id == 1 ? "立方体" : (id == 2 ? "半透明板" : "无"),
+                   id ? "已选中" : "取消选中");
         }
         sp_clear(SP_COLOR | SP_DEPTH);
         draw_scene(W, H, (float)angle);

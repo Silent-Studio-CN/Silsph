@@ -20,6 +20,7 @@ Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o obj_test.exe obj_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o bmp_test.exe bmp_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o pick_test.exe pick_test.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o gizmo_test.exe gizmo_test.c -L. -lsilsph_soft
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== OK: silsph_soft.dll / demo_soft.exe =="
