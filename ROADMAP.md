@@ -12,7 +12,7 @@
 6. ✅ **资源加载**（OBJ 模型：v/vt/vn/f+四边形拆分；BMP 纹理 24/32bpp；obj_test/bmp_test 全过）——PNG/glTF 待补
 7. ✅ **拾取（picking）**（ID 缓冲：`sp_load_id`/`sp_pick_id`/`SP_ID`；深度遮挡语义正确；demo 窗口点击拾取）
 8. ✅ **Gizmo/网格/坐标轴/选中描边**（三色坐标轴+锥头 always-on-top；亮黄线框描边；demo 点击选中联动；gizmo_test 全过）
-9. **离屏渲染**：软渲染做缩略图/构建/CI 出图（确定性回归基准）
+9. ✅ **离屏渲染 + 确定性回归基准**（`sp_save_bmp` 离屏输出；regress 黄金图像比对套件：3 场景差异像素=0，双渲染逐字节自检）
 10. **Python ctypes + Rust FFI 绑定**：接 PySide6 编辑器与 Rust ECS 的桥，API 越早定越好
 
 ## 第二档：真游戏引擎渲染器（定位关键）

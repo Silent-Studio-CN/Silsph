@@ -45,6 +45,7 @@ SP_API void sp_viewport(int x, int y, int w, int h);
 SP_API void sp_clear_color(float r, float g, float b, float a);
 SP_API void sp_clear(unsigned flags);
 SP_API const unsigned char* sp_pixels(int* w, int* h);   // 颜色缓冲，内存序 B,G,R,A
+SP_API int sp_save_bmp(const char* path);                   // 帧缓冲存 BMP（32bpp），成功 1
 
 /* ---- 矩阵（行主序，与 silsph.cpp 一致） ---- */
 SP_API void sp_matrix_mode(int mode);

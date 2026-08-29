@@ -675,6 +675,33 @@ SP_API const unsigned char* sp_pixels(int* w, int* h) {
     if (h) *h = S.height;
     return (const unsigned char*)S.color;
 }
+/* 离屏输出：帧缓冲 -> BMP 文件（32bpp BI_RGB，内存序 B,G,R,A 直接写） */
+SP_API int sp_save_bmp(const char* path) {
+    if (!S.color || S.width <= 0 || S.height <= 0) return 0;
+    int w = S.width, h = S.height, row = w * 4;
+    unsigned char hdr[54] = {0};
+    unsigned bfSize = 54u + (unsigned)(row * h);
+    hdr[0]='B'; hdr[1]='M';
+    hdr[2]=(unsigned char)bfSize; hdr[3]=(unsigned char)(bfSize>>8);
+    hdr[4]=(unsigned char)(bfSize>>16); hdr[5]=(unsigned char)(bfSize>>24);
+    hdr[10]=54;
+    hdr[14]=40;
+    hdr[18]=(unsigned char)w; hdr[19]=(unsigned char)(w>>8);
+    hdr[20]=(unsigned char)(w>>16); hdr[21]=(unsigned char)(w>>24);
+    hdr[22]=(unsigned char)h; hdr[23]=(unsigned char)(h>>8);
+    hdr[24]=(unsigned char)(h>>16); hdr[25]=(unsigned char)(h>>24);
+    hdr[26]=1; hdr[28]=32;
+    unsigned si = (unsigned)(row * h);
+    hdr[34]=(unsigned char)si; hdr[35]=(unsigned char)(si>>8);
+    hdr[36]=(unsigned char)(si>>16); hdr[37]=(unsigned char)(si>>24);
+    FILE* f = fopen(path, "wb");
+    if (!f) return 0;
+    fwrite(hdr, 1, 54, f);
+    for (int y = h - 1; y >= 0; y--)   /* BMP bottom-up */
+        fwrite((const unsigned char*)S.color + (size_t)y * row, 1, (size_t)row, f);
+    fclose(f);
+    return 1;
+}
 SP_API void sp_matrix_mode(int mode) { S.matrix_mode = mode; }
 SP_API void sp_load_identity(void) {
     if (S.matrix_mode == SP_PROJECTION) m4_identity(&S.proj);
