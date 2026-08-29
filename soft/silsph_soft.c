@@ -123,6 +123,8 @@ static struct {
     int      vp_x, vp_y, vp_w, vp_h; /* 视口 */
     uint32_t* color;                 /* 颜色缓冲，值 0xAABBGGRR，内存序 B,G,R,A */
     float*   depth;                  /* 深度缓冲（NDC z，-1..1） */
+    uint32_t* idbuf;                 /* 拾取 ID 缓冲 */
+    int      cur_id;                 /* 当前拾取 ID */
     float    clear_r, clear_g, clear_b;
     int      matrix_mode;
     Mat4     proj, modelview, mvp;
@@ -254,6 +256,7 @@ static void put_pixel(int x, int y_up, float zndc, float r, float g, float b, fl
     uint32_t gi = (uint32_t)((g < 0 ? 0 : (g > 1 ? 1 : g)) * 255.0f);
     uint32_t bi = (uint32_t)((b < 0 ? 0 : (b > 1 ? 1 : b)) * 255.0f);
     S.color[row * S.width + x] = 0xFF000000u | (ri << 16) | (gi << 8) | bi;
+    S.idbuf[row * S.width + x] = (uint32_t)S.cur_id;   /* 拾取 ID 与像素同步写入 */
 }
 
 static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
@@ -381,7 +384,8 @@ static void raster_line(const Pv* a, const Pv* b) {
 SP_API int sp_create(int width, int height) {
     S.color = (uint32_t*)malloc((size_t)width * height * sizeof(uint32_t));
     S.depth = (float*)malloc((size_t)width * height * sizeof(float));
-    if (!S.color || !S.depth) { sp_destroy(); return 0; }
+    S.idbuf = (uint32_t*)malloc((size_t)width * height * sizeof(uint32_t));
+    if (!S.color || !S.depth || !S.idbuf) { sp_destroy(); return 0; }
     S.width = width; S.height = height;
     sp_viewport(0, 0, width, height);
     sp_clear_color(0.0f, 0.0f, 0.0f, 1.0f);
@@ -392,11 +396,17 @@ SP_API int sp_create(int width, int height) {
     S.cur_tex = 0;
     S.prim_mode = SP_TRIANGLES; S.vcount = 0;
     S.cull_enable = 1; S.depth_enable = 1; S.blend_enable = 0;
+    S.cur_id = 0;
     return 1;
 }
 SP_API void sp_cull_face(int enable) { S.cull_enable = enable ? 1 : 0; }
 SP_API void sp_depth_test(int enable) { S.depth_enable = enable ? 1 : 0; }
 SP_API void sp_blend(int enable) { S.blend_enable = enable ? 1 : 0; }
+SP_API void sp_load_id(int id) { S.cur_id = id; }
+SP_API int sp_pick_id(int x, int y) {
+    if (!S.idbuf || x < 0 || x >= S.width || y < 0 || y >= S.height) return 0;
+    return (int)S.idbuf[(size_t)y * S.width + x];
+}
 
 /* ================= 纹理 API ================= */
 SP_API int sp_gen_texture(int w, int h, const unsigned char* rgba) {
@@ -612,7 +622,7 @@ SP_API int sp_get_sysinfo(sp_sysinfo* out) {
     return 1;
 }
 SP_API void sp_destroy(void) {
-    free(S.color); free(S.depth);
+    free(S.color); free(S.depth); free(S.idbuf);
     for (int i = 0; i < SP_MAX_TEX; i++) { free(texs[i].rgba); memset(&texs[i], 0, sizeof(texs[i])); }
     memset(&S, 0, sizeof(S));
 }
@@ -657,6 +667,8 @@ SP_API void sp_clear(unsigned flags) {
     }
     if (flags & SP_DEPTH)
         for (int i = 0; i < S.width * S.height; i++) S.depth[i] = 1.0f; /* NDC 最远 */
+    if (flags & SP_ID)
+        for (int i = 0; i < S.width * S.height; i++) S.idbuf[i] = 0;
 }
 SP_API const unsigned char* sp_pixels(int* w, int* h) {
     if (w) *w = S.width;

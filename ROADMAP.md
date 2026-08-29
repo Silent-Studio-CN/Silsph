@@ -10,7 +10,7 @@
 4. ✅ **正交投影 + 更多图元**（`sp_ortho`；三角形条带/扇、点、线带；prim_test 全过）
 5. ✅ **场景图/变换层级**（`sp_push/pop_matrix` 栈 + `sp_translate/sp_scale`；太阳-地球-月亮 scene_test 质心验证全过）
 6. ✅ **资源加载**（OBJ 模型：v/vt/vn/f+四边形拆分；BMP 纹理 24/32bpp；obj_test/bmp_test 全过）——PNG/glTF 待补
-7. **拾取（picking）**：物体 ID 渲染或命中测试
+7. ✅ **拾取（picking）**（ID 缓冲：`sp_load_id`/`sp_pick_id`/`SP_ID`；深度遮挡语义正确；demo 窗口点击拾取）
 8. **Gizmo/网格/坐标轴/选中描边**：编辑器操作必需
 9. **离屏渲染**：软渲染做缩略图/构建/CI 出图（确定性回归基准）
 10. **Python ctypes + Rust FFI 绑定**：接 PySide6 编辑器与 Rust ECS 的桥，API 越早定越好

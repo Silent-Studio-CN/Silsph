@@ -16,7 +16,7 @@ echo "== 1/2 编译 libsilsph_soft.$EXT =="
 $CC -O2 -std=c11 -Wall -Wextra -shared -fPIC -o libsilsph_soft.$EXT silsph_soft.c silsph_res.c
 
 echo "== 2/2 编译 demo/crop/perf =="
-for t in demo_soft crop_test perf_soft prim_test scene_test obj_test bmp_test; do
+for t in demo_soft crop_test perf_soft prim_test scene_test obj_test bmp_test pick_test; do
   $CC -O2 -std=c11 -Wall -Wextra -o $t $t.c -L. -lsilsph_soft $RPATH
 done
 

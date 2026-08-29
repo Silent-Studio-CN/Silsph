@@ -20,6 +20,7 @@
 /* ---- 清除标志 ---- */
 #define SP_COLOR 0x4000
 #define SP_DEPTH 0x0100
+#define SP_ID    0x0200
 
 /* ---- 图元模式（GL 风格值） ---- */
 #define SP_POINTS         0x0000
@@ -75,6 +76,10 @@ SP_API void sp_tex_wrap(int mode);        /* SP_TEX_REPEAT / SP_TEX_CLAMP */
 
 /* ---- 画质控制 ---- */
 SP_API void sp_blend(int enable);      /* alpha 混合（src_alpha / 1-src_alpha，默认关） */
+
+/* ---- 拾取（ID 缓冲） ---- */
+SP_API void sp_load_id(int id);       /* 当前图元拾取 ID（默认 0=无） */
+SP_API int  sp_pick_id(int x, int y); /* 读 ID 缓冲 (x,y)，窗口坐标（y 向下），越界返回 0 */
 SP_API void sp_cull_face(int enable);   /* 背面剔除（默认开，1=开） */
 SP_API void sp_depth_test(int enable);  /* 深度测试与写入（默认开，1=开） */
 

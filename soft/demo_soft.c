@@ -79,6 +79,11 @@ static void init_half_texture(void) {
     free(px);
 }
 
+/* 拾取交互：g_pick_mode=1 时 draw_scene 写入物体 ID（立方体=1，板=2） */
+static int g_pick_mode = 0;
+static int g_pick_req = 0;
+static int g_pick_x = 0, g_pick_y = 0;
+
 /* 棋盘格纹理（Qraft 青/深底，8px 格）：懒初始化 */
 static int g_tex_checker = 0;
 static void init_checker_texture(void) {
@@ -110,6 +115,7 @@ static void draw_scene(int W, int H, float angle) {
     sp_rotate(angle * 57.295779513f, 0, 1, 0);
     sp_rotate(angle * 0.6f * 57.295779513f, 1, 0, 0);
 
+    if (g_pick_mode) sp_load_id(1);   /* 立方体 */
     const float faces[6][6] = {
         {0,0,-1, 1.0f,0.62f,0.25f}, {0,0,1, 0.31f,1.0f,0.99f},
         {-1,0,0, 0.44f,0.69f,1.0f}, {1,0,0, 1.0f,0.44f,0.69f},
@@ -141,6 +147,7 @@ static void draw_scene(int W, int H, float angle) {
         sp_end();
     }
     /* 半透明板：立在立方体前方 z=2.5，混合后面景物（painter：不透明先画，透明后画） */
+    if (g_pick_mode) sp_load_id(2);   /* 半透明板 */
     if (!g_tex_half) init_half_texture();
     sp_blend(1);
     sp_bind_texture(g_tex_half);
@@ -154,6 +161,7 @@ static void draw_scene(int W, int H, float angle) {
     sp_texcoord2f(1,1); sp_vertex3f( 1.5f,  1.5f, 2.5f);
     sp_end();
     sp_blend(0);
+    if (g_pick_mode) sp_load_id(0);   /* 网格不可拾取 */
     sp_bind_texture(0);   /* 网格线纯色 */
     sp_color3f(0.35f, 0.40f, 0.55f);
     sp_begin(SP_LINES);
@@ -178,6 +186,11 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) { DestroyWindow(hwnd); return 0; }
         break;
+    case WM_LBUTTONDOWN:
+        g_pick_x = (short)LOWORD(lp);
+        g_pick_y = (short)HIWORD(lp);
+        g_pick_req = 1;
+        return 0;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
 }
@@ -242,6 +255,16 @@ static void window_mode(void) {
         double now = now_ms();
         angle += (now - t0) / 1000.0 * 1.2;   /* 与 GL demo 同速 */
         t0 = now;
+        if (g_pick_req) {   /* 点击拾取：ID 帧渲染后读回 */
+            g_pick_req = 0;
+            sp_clear(SP_COLOR | SP_DEPTH | SP_ID);
+            g_pick_mode = 1;
+            draw_scene(W, H, (float)angle);
+            g_pick_mode = 0;
+            int id = sp_pick_id(g_pick_x, g_pick_y);
+            printf("拾取 (%d,%d) -> ID %d (%s)\n", g_pick_x, g_pick_y, id,
+                   id == 1 ? "立方体" : (id == 2 ? "半透明板" : "无"));
+        }
         sp_clear(SP_COLOR | SP_DEPTH);
         draw_scene(W, H, (float)angle);
         window_blit(W, H);
