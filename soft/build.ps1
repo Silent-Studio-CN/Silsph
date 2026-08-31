@@ -22,6 +22,10 @@ Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o pick_test.exe pick_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o gizmo_test.exe gizmo_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o regress.exe regress.c -L. -lsilsph_soft
+# Rust FFI demo（需 rustc；LoadLibrary 动态加载，无需链接库）
+if (Get-Command rustc -ErrorAction SilentlyContinue) {
+    & rustc -O sp_rust_demo.rs -o sp_rust_demo.exe
+}
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== OK: silsph_soft.dll / demo_soft.exe =="

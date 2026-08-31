@@ -124,8 +124,10 @@ static void draw_scene(int W, int H, float angle) {
     };
     for (int i = 0; i < 6; i++) {
         const float* n = faces[i]; const float* c = faces[i] + 3;
-        float tx[3] = { n[1] ? 1.0f : 0.0f, n[0] ? 0.0f : 1.0f, 0.0f };
-        if (n[2] != 0) { tx[0]=1; tx[1]=0; tx[2]=0; }
+        float tx[3];
+        if (n[2] != 0.0f)      { tx[0]=1; tx[1]=0; tx[2]=0; }   /* z 面：x 轴 */
+        else if (n[1] != 0.0f) { tx[0]=1; tx[1]=0; tx[2]=0; }   /* y 面：x 轴 */
+        else                   { tx[0]=0; tx[1]=0; tx[2]=1; }   /* x 面：z 轴 */
         float ty[3] = { n[1]*tx[2]-n[2]*tx[1], n[2]*tx[0]-n[0]*tx[2], n[0]*tx[1]-n[1]*tx[0] };
         float col[3]; lit_color(n, c, angle, col);
         sp_color3f(col[0], col[1], col[2]);

@@ -31,8 +31,10 @@ static void scene_cube(float angle) {
     };
     for (int i = 0; i < 6; i++) {
         const float* n = faces[i];
-        float tx[3] = { n[1] ? 1.0f : 0.0f, n[0] ? 0.0f : 1.0f, 0.0f };
-        if (n[2] != 0) { tx[0]=1; tx[1]=0; tx[2]=0; }
+        float tx[3];
+        if (n[2] != 0.0f)      { tx[0]=1; tx[1]=0; tx[2]=0; }   /* z 面：x 轴 */
+        else if (n[1] != 0.0f) { tx[0]=1; tx[1]=0; tx[2]=0; }   /* y 面：x 轴 */
+        else                   { tx[0]=0; tx[1]=0; tx[2]=1; }   /* x 面：z 轴 */
         float ty[3] = { n[1]*tx[2]-n[2]*tx[1], n[2]*tx[0]-n[0]*tx[2], n[0]*tx[1]-n[1]*tx[0] };
         sp_color3f(faces[i][3], faces[i][4], faces[i][5]);
         float v[4][3];
