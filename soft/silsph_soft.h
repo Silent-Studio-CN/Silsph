@@ -41,6 +41,8 @@ extern "C" {
 /* ---- 帧缓冲 ---- */
 SP_API int  sp_create(int width, int height);            // 分配颜色/深度缓冲，成功返回 1
 SP_API void sp_destroy(void);
+SP_API void sp_flush(void);                          // 回放已提交图元（多线程光栅化；sp_pixels/save 自动调用）
+SP_API void sp_set_threads(int n);                   // 光栅化线程数：0=自动(默认)，1=串行
 SP_API void sp_viewport(int x, int y, int w, int h);
 SP_API void sp_clear_color(float r, float g, float b, float a);
 SP_API void sp_clear(unsigned flags);

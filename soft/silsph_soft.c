@@ -137,6 +137,11 @@ static struct {
     float    cur_u, cur_v;   /* 当前纹理坐标 */
     int      cur_tex;        /* 当前纹理 ID（0 = 无纹理） */
     struct Vtx { float x, y, z; float r, g, b; float u, v; } verts[MAX_VERTS];
+    /* 延迟光栅化缓冲（保持提交顺序；三角形按 y 分块多线程并行） */
+    struct Prim* prims;
+    int      nprim, cprim;
+    int      pending;         /* 有待回放图元 */
+    int      threads;         /* 光栅化线程数（0=自动） */
 } S;
 
 /* ---- 纹理存储 ---- */
@@ -147,6 +152,10 @@ static Tex texs[SP_MAX_TEX];
 typedef struct { float x, y, z, w; float r, g, b; float u, v; } ClipV;
 /* 屏幕坐标顶点：y 向上（与 GL 窗口坐标一致）+ clip z/w + 颜色 + UV */
 typedef struct { float sx, sy; float zc, wc; float r, g, b; float u, v; } Pv;
+/* 延迟光栅化图元：0=三角形(a,b,c) 1=线段(a,b) 2=点(a) + 提交时刻渲染状态快照
+   （延迟回放必须用提交时状态：纹理/混合/剔除/深度/拾取 ID） */
+typedef struct { int tex, blend, cull, depth, id; } RastState;
+struct Prim { int type; Pv a, b, c; RastState st; };
 
 static void xform_vertex(const struct Vtx* v, ClipV* o) {
     m4_transform(&S.mvp, v->x, v->y, v->z, 1.0f, &o->x, &o->y, &o->z, &o->w);
@@ -233,17 +242,18 @@ static int clip_frustum(const ClipV in[3], ClipV out[12]) {
     return n;
 }
 
-static void put_pixel(int x, int y_up, float zndc, float r, float g, float b, float a) {
+static void put_pixel(int x, int y_up, float zndc, float r, float g, float b, float a,
+                     const RastState* st) {
     if (x < S.vp_x || x >= S.vp_x + S.vp_w) return;
     if (y_up < S.vp_y || y_up >= S.vp_y + S.vp_h) return;
     int row = S.height - 1 - y_up;          /* 窗口 y 向上 -> 帧缓冲行（顶行=0） */
     float* d = &S.depth[row * S.width + x];
-    if (S.depth_enable) {
+    if (st->depth) {
         if (zndc >= *d) return;             /* 深度测试 LESS */
         *d = zndc;
     }
     uint32_t* px = &S.color[row * S.width + x];
-    if (S.blend_enable && a < 1.0f) {       /* alpha 混合：src_alpha / 1-src_alpha */
+    if (st->blend && a < 1.0f) {            /* alpha 混合：src_alpha / 1-src_alpha */
         uint32_t dst = *px;
         float dr = (float)((dst >> 16) & 0xFF) / 255.0f;
         float dg = (float)((dst >> 8)  & 0xFF) / 255.0f;
@@ -256,18 +266,20 @@ static void put_pixel(int x, int y_up, float zndc, float r, float g, float b, fl
     uint32_t gi = (uint32_t)((g < 0 ? 0 : (g > 1 ? 1 : g)) * 255.0f);
     uint32_t bi = (uint32_t)((b < 0 ? 0 : (b > 1 ? 1 : b)) * 255.0f);
     S.color[row * S.width + x] = 0xFF000000u | (ri << 16) | (gi << 8) | bi;
-    S.idbuf[row * S.width + x] = (uint32_t)S.cur_id;   /* 拾取 ID 与像素同步写入 */
+    S.idbuf[row * S.width + x] = (uint32_t)st->id;     /* 拾取 ID 与像素同步写入（提交时快照） */
 }
 
 static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
                        float b0, float b1, float b2, float iw,
-                       float* r, float* g, float* bb, float* al);
+                       float* r, float* g, float* bb, float* al, const RastState* st);
 
 /* ================= 光栅化：三角形（edge function + 重心坐标 + 透视校正） ================= */
-static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
+/* tile_y0/tile_y1：本线程负责的 y 行区间（多线程分块），串行时 = 视口全高 */
+static void raster_tri(const Pv* a, const Pv* b, const Pv* c, int tile_y0, int tile_y1,
+                       const RastState* st) {
     /* 背面剔除：GL 窗口坐标（y 向上）CCW 为正面；signed area > 0 即 CCW，剔除其余（对应 CULL_BACK） */
     float area = (b->sx - a->sx) * (c->sy - a->sy) - (b->sy - a->sy) * (c->sx - a->sx);
-    if (S.cull_enable && area <= 0.0f) return;
+    if (st->cull && area <= 0.0f) return;
     /* 顶点已过近平面裁剪（w > 0），此处不再检查 */
     float inv_area = 1.0f / area;
     int minx = (int)ceilf(fminf(a->sx, fminf(b->sx, c->sx)));
@@ -276,13 +288,14 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
     int maxy = (int)floorf(fmaxf(a->sy, fmaxf(b->sy, c->sy)));
     if (minx < S.vp_x) minx = S.vp_x;
     if (maxx > S.vp_x + S.vp_w - 1) maxx = S.vp_x + S.vp_w - 1;
-    if (miny < S.vp_y) miny = S.vp_y;
-    if (maxy > S.vp_y + S.vp_h - 1) maxy = S.vp_y + S.vp_h - 1;
+    if (miny < tile_y0) miny = tile_y0;
+    if (maxy > tile_y1) maxy = tile_y1;
+    if (miny > maxy) return;
     for (int y = miny; y <= maxy; y++) {
         float py = (float)y + 0.5f;
         for (int x = minx; x <= maxx; x++) {
             float px = (float)x + 0.5f;
-            /* Pineda edge functions：CCW 三角形内部全部 >= 0 */
+            /* Pineda edge functions：CCW 三角形内部全部 >= 0（直接计算：确定性与黄金图一致） */
             float w0 = (b->sx - a->sx) * (py - a->sy) - (b->sy - a->sy) * (px - a->sx);
             float w1 = (c->sx - b->sx) * (py - b->sy) - (c->sy - b->sy) * (px - b->sx);
             float w2 = (a->sx - c->sx) * (py - c->sy) - (a->sy - c->sy) * (px - c->sx);
@@ -294,22 +307,22 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c) {
             float zndc = (b0 * a->zc + b1 * b->zc + b2 * c->zc) / denom;
             float iw = b0 / a->wc + b1 / b->wc + b2 / c->wc;
             float r, g, bb, al = 1.0f;
-            if (S.cur_tex > 0 && S.cur_tex <= SP_MAX_TEX && texs[S.cur_tex-1].rgba) {
-                sample_tex(a, b, c, b0, b1, b2, iw, &r, &g, &bb, &al);
+            if (st->tex > 0 && st->tex <= SP_MAX_TEX && texs[st->tex-1].rgba) {
+                sample_tex(a, b, c, b0, b1, b2, iw, &r, &g, &bb, &al, st);
             } else {
                 r = (b0 * a->r / a->wc + b1 * b->r / b->wc + b2 * c->r / c->wc) / iw;
                 g = (b0 * a->g / a->wc + b1 * b->g / b->wc + b2 * c->g / c->wc) / iw;
                 bb = (b0 * a->b / a->wc + b1 * b->b / b->wc + b2 * c->b / c->wc) / iw;
             }
-            put_pixel(x, y, zndc, r, g, bb, al);
+            put_pixel(x, y, zndc, r, g, bb, al, st);
         }
     }
 }
 
 /* ================= 光栅化：点（1 像素） ================= */
-static void raster_point(const Pv* p) {
+static void raster_point(const Pv* p, const RastState* st) {
     int x = (int)p->sx, y = (int)p->sy;
-    put_pixel(x, y, p->zc / p->wc, p->r, p->g, p->b, 1.0f);
+    put_pixel(x, y, p->zc / p->wc, p->r, p->g, p->b, 1.0f, st);
 }
 
 /* ================= 纹理采样 ================= */
@@ -328,13 +341,13 @@ static void texel_rgba(const Tex* t, int x, int y, float out[4]) {
 /* 透视校正插值 UV 并采样；输出 = 纹素色 × 顶点光照色（GL 语义 frag = texel * light） */
 static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
                        float b0, float b1, float b2, float iw,
-                       float* r, float* g, float* bb, float* al) {
+                       float* r, float* g, float* bb, float* al, const RastState* st) {
     float u = (b0*a->u/a->wc + b1*b->u/b->wc + b2*c->u/c->wc) / iw;
     float v = (b0*a->v/a->wc + b1*b->v/b->wc + b2*c->v/c->wc) / iw;
     float vr = (b0*a->r/a->wc + b1*b->r/b->wc + b2*c->r/c->wc) / iw;  /* 顶点光照色 */
     float vg = (b0*a->g/a->wc + b1*b->g/b->wc + b2*c->g/c->wc) / iw;
     float vb = (b0*a->b/a->wc + b1*b->b/b->wc + b2*c->b/c->wc) / iw;
-    const Tex* t = &texs[S.cur_tex - 1];
+    const Tex* t = &texs[st->tex - 1];
     if (t->wrap == SP_TEX_REPEAT) { u -= floorf(u); v -= floorf(v); }
     else { if (u < 0) u = 0; else if (u > 1) u = 1; if (v < 0) v = 0; else if (v > 1) v = 1; }
     float fx = u * (float)t->w - 0.5f;
@@ -363,7 +376,7 @@ static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
 }
 
 /* ================= 光栅化：线段（DDA + 深度测试） ================= */
-static void raster_line(const Pv* a, const Pv* b) {
+static void raster_line(const Pv* a, const Pv* b, const RastState* st) {
     if (a->wc <= 0.0f || b->wc <= 0.0f) return;
     float dx = b->sx - a->sx, dy = b->sy - a->sy;
     int steps = (int)fmaxf(fabsf(dx), fabsf(dy)) + 1;
@@ -376,7 +389,7 @@ static void raster_line(const Pv* a, const Pv* b) {
         float g = a->g + (b->g - a->g) * t;
         float bb = a->b + (b->b - a->b) * t;
         if (wc <= 0.0f) continue;
-        put_pixel((int)x, (int)y, zc / wc, r, g, bb, 1.0f);
+        put_pixel((int)x, (int)y, zc / wc, r, g, bb, 1.0f, st);
     }
 }
 
@@ -397,6 +410,7 @@ SP_API int sp_create(int width, int height) {
     S.prim_mode = SP_TRIANGLES; S.vcount = 0;
     S.cull_enable = 1; S.depth_enable = 1; S.blend_enable = 0;
     S.cur_id = 0;
+    S.prims = NULL; S.nprim = S.cprim = 0; S.pending = 0; S.threads = 0;
     return 1;
 }
 SP_API void sp_cull_face(int enable) { S.cull_enable = enable ? 1 : 0; }
@@ -404,6 +418,7 @@ SP_API void sp_depth_test(int enable) { S.depth_enable = enable ? 1 : 0; }
 SP_API void sp_blend(int enable) { S.blend_enable = enable ? 1 : 0; }
 SP_API void sp_load_id(int id) { S.cur_id = id; }
 SP_API int sp_pick_id(int x, int y) {
+    sp_flush();
     if (!S.idbuf || x < 0 || x >= S.width || y < 0 || y >= S.height) return 0;
     return (int)S.idbuf[(size_t)y * S.width + x];
 }
@@ -621,13 +636,138 @@ SP_API int sp_get_sysinfo(sp_sysinfo* out) {
 #endif
     return 1;
 }
+static void sp_threads_stop(void);   /* 前向声明（线程池段在其后） */
+
 SP_API void sp_destroy(void) {
+    sp_flush();
     free(S.color); free(S.depth); free(S.idbuf);
+    free(S.prims);
     for (int i = 0; i < SP_MAX_TEX; i++) { free(texs[i].rgba); memset(&texs[i], 0, sizeof(texs[i])); }
+    sp_threads_stop();
     memset(&S, 0, sizeof(S));
 }
 
 /* ================= 平台工具（跨平台） ================= */
+/* ================= 多线程分块光栅化 ================= */
+#ifdef _WIN32
+#include <process.h>
+#define SP_MAX_THREADS 15
+static HANDLE g_workers[SP_MAX_THREADS];
+static int g_nworkers = 0;
+static HANDLE g_ev[SP_MAX_THREADS];   /* 每 worker 一个自动重置事件：SetEvent 只唤醒一次，无轮次泄漏 */
+static volatile LONG g_exit_flag = 0;
+static volatile LONG g_tile_next = 0, g_tile_done = 0;
+static int g_tile_count = 1;
+static int g_batch_begin = 0, g_batch_end = 0;
+static int g_tile_y0 = 0, g_tile_y1 = 0;
+
+/* worker：事件唤醒 -> 原子取 tile -> 光栅化该批次（tile 内按提交顺序 -> 与串行逐位一致） */
+static unsigned __stdcall sp_worker(void* arg) {
+    int idx = (int)(intptr_t)arg;
+    for (;;) {
+        WaitForSingleObject(g_ev[idx], INFINITE);
+        if (g_exit_flag) break;
+        for (;;) {
+            LONG t = InterlockedIncrement(&g_tile_next) - 1;
+            if (t >= g_tile_count) break;
+            int span = g_tile_y1 - g_tile_y0 + 1;
+            int y0 = g_tile_y0 + (int)((long long)span * t / g_tile_count);
+            int y1 = g_tile_y0 + (int)((long long)span * (t + 1) / g_tile_count) - 1;
+            for (int i = g_batch_begin; i < g_batch_end; i++)
+                raster_tri(&S.prims[i].a, &S.prims[i].b, &S.prims[i].c, y0, y1, &S.prims[i].st);
+        }
+        InterlockedIncrement(&g_tile_done);
+    }
+    return 0;
+}
+static void sp_threads_start(int n) {
+    if (g_ev[0]) return;
+    g_nworkers = n;
+    for (int i = 0; i < n; i++) {
+        g_ev[i] = CreateEventA(NULL, FALSE, FALSE, NULL);   /* 自动重置 */
+        g_workers[i] = (HANDLE)_beginthreadex(NULL, 0, sp_worker, (void*)(intptr_t)i, 0, NULL);
+    }
+}
+static void sp_threads_stop(void) {
+    if (!g_ev[0]) return;
+    g_exit_flag = 1;
+    for (int i = 0; i < g_nworkers; i++) SetEvent(g_ev[i]);
+    WaitForMultipleObjects((DWORD)g_nworkers, g_workers, TRUE, 2000);
+    for (int i = 0; i < g_nworkers; i++) { CloseHandle(g_workers[i]); CloseHandle(g_ev[i]); g_ev[i] = NULL; }
+    g_nworkers = 0;
+    g_exit_flag = 0;
+}
+static int sp_auto_threads(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int n = (int)si.dwNumberOfProcessors;
+    return n > SP_MAX_THREADS + 1 ? SP_MAX_THREADS + 1 : n;
+}
+#else
+static int sp_auto_threads(void) { return 1; }
+#endif
+
+/* 并行光栅化三角形批次 [begin, end)：按 y 分块，每 tile 内保持提交顺序 */
+static void raster_tris_parallel(int begin, int end) {
+    int tn = S.threads;
+    if (tn == 0) tn = sp_auto_threads();
+    if (tn <= 1 || end <= begin) {
+        for (int i = begin; i < end; i++)
+            raster_tri(&S.prims[i].a, &S.prims[i].b, &S.prims[i].c,
+                       S.vp_y, S.vp_y + S.vp_h - 1, &S.prims[i].st);
+        return;
+    }
+#ifdef _WIN32
+    sp_threads_start(tn - 1);   /* 主线程也参与一个 tile */
+    g_batch_begin = begin;
+    g_batch_end = end;
+    g_tile_count = tn;
+    g_tile_y0 = S.vp_y;
+    g_tile_y1 = S.vp_y + S.vp_h - 1;
+    g_tile_next = 0;
+    g_tile_done = 0;
+    for (int i = 0; i < g_nworkers; i++) SetEvent(g_ev[i]);   /* 逐 worker 唤醒 */
+    /* 主线程取 tile */
+    int span = g_tile_y1 - g_tile_y0 + 1;
+    for (;;) {
+        LONG t = InterlockedIncrement(&g_tile_next) - 1;
+        if (t >= g_tile_count) break;
+        int y0 = g_tile_y0 + (int)((long long)span * t / g_tile_count);
+        int y1 = g_tile_y0 + (int)((long long)span * (t + 1) / g_tile_count) - 1;
+        for (int i = begin; i < end; i++)
+            raster_tri(&S.prims[i].a, &S.prims[i].b, &S.prims[i].c, y0, y1, &S.prims[i].st);
+    }
+    while (InterlockedCompareExchange(&g_tile_done, 0, 0) < (LONG)(tn - 1)) Sleep(0);
+#else
+    for (int i = begin; i < end; i++)
+        raster_tri(&S.prims[i].a, &S.prims[i].b, &S.prims[i].c,
+                   S.vp_y, S.vp_y + S.vp_h - 1, &S.prims[i].st);
+#endif
+}
+
+/* 回放全部已提交图元（保持提交顺序；三角形批次并行，线/点串行插入） */
+SP_API void sp_flush(void) {
+    if (!S.pending) return;
+    S.pending = 0;
+    int n = S.nprim;
+    if (n == 0) return;
+    int b = 0;
+    for (int i = 0; i <= n; i++) {
+        int is_tri = (i < n && S.prims[i].type == 0);
+        if (!is_tri || i == n) {
+            if (i > b) raster_tris_parallel(b, i);
+            if (i < n) {
+                struct Prim* p = &S.prims[i];
+                if (p->type == 1) raster_line(&p->a, &p->b, &p->st);
+                else if (p->type == 2) raster_point(&p->a, &p->st);
+            }
+            b = i + 1;
+        }
+    }
+    S.nprim = 0;
+}
+SP_API void sp_set_threads(int n) { S.threads = n < 0 ? 0 : n; }
+
 SP_API double sp_now_ms(void) {
 #ifdef _WIN32
     static LARGE_INTEGER freq; static int once = 0;
@@ -658,6 +798,7 @@ SP_API void sp_clear_color(float r, float g, float b, float a) {
     (void)a; S.clear_r = r; S.clear_g = g; S.clear_b = b;
 }
 SP_API void sp_clear(unsigned flags) {
+    sp_flush();   /* 帧边界：先回放上一帧待处理图元（GL 语义） */
     if (flags & SP_COLOR) {
         uint32_t c = 0xFF000000u
                    | ((uint32_t)(S.clear_r * 255.0f) << 16)
@@ -671,12 +812,14 @@ SP_API void sp_clear(unsigned flags) {
         for (int i = 0; i < S.width * S.height; i++) S.idbuf[i] = 0;
 }
 SP_API const unsigned char* sp_pixels(int* w, int* h) {
+    sp_flush();   /* 自动回放待处理图元 */
     if (w) *w = S.width;
     if (h) *h = S.height;
     return (const unsigned char*)S.color;
 }
 /* 离屏输出：帧缓冲 -> BMP 文件（32bpp BI_RGB，内存序 B,G,R,A 直接写） */
 SP_API int sp_save_bmp(const char* path) {
+    sp_flush();
     if (!S.color || S.width <= 0 || S.height <= 0) return 0;
     int w = S.width, h = S.height, row = w * 4;
     unsigned char hdr[54] = {0};
@@ -750,7 +893,28 @@ SP_API void sp_vertex3f(float x, float y, float z) {
     v->r = S.cur_r; v->g = S.cur_g; v->b = S.cur_b;
     v->u = S.cur_u; v->v = S.cur_v;
 }
-/* ---- 图元发射器（共用的装配/裁剪/光栅化路径） ---- */
+/* ---- 图元发射器：装配/裁剪 -> 延迟缓冲（回放时多线程光栅化，保持提交顺序） ---- */
+static int prim_push(int type, const Pv* a, const Pv* b, const Pv* c) {
+    if (S.nprim >= S.cprim) {
+        int nc = S.cprim ? S.cprim * 2 : 4096;
+        struct Prim* np = (struct Prim*)realloc(S.prims, (size_t)nc * sizeof(struct Prim));
+        if (!np) return 0;
+        S.prims = np;
+        S.cprim = nc;
+    }
+    struct Prim* p = &S.prims[S.nprim++];
+    p->type = type;
+    p->a = *a;
+    if (b) p->b = *b;
+    if (c) p->c = *c;
+    p->st.tex = S.cur_tex;          /* 提交时刻状态快照 */
+    p->st.blend = S.blend_enable;
+    p->st.cull = S.cull_enable;
+    p->st.depth = S.depth_enable;
+    p->st.id = S.cur_id;
+    S.pending = 1;
+    return 1;
+}
 static void emit_tri(const struct Vtx* v0, const struct Vtx* v1, const struct Vtx* v2) {
     ClipV cv[3];
     xform_vertex(v0, &cv[0]);
@@ -758,23 +922,13 @@ static void emit_tri(const struct Vtx* v0, const struct Vtx* v1, const struct Vt
     xform_vertex(v2, &cv[2]);
     ClipV poly[12];
     int np = clip_frustum(cv, poly);   /* 6 平面视锥裁剪 */
-#ifdef SP_DEBUG
-    if (np >= 3) {
-        fprintf(stderr, "tri: np=%d", np);
-        for (int k = 0; k < np; k++) {
-            Pv s; to_screen(&poly[k], &s);
-            fprintf(stderr, " (%.1f,%.1f w=%.3f)", s.sx, s.sy, s.wc);
-        }
-        fprintf(stderr, "\n");
-    }
-#endif
     if (np < 3) return;                /* 完全在视锥外 */
     Pv a, b, c;
     to_screen(&poly[0], &a);
     for (int k = 1; k + 1 < np; k++) { /* 扇形三角化（裁剪后至多 9 边形） */
         to_screen(&poly[k],   &b);
         to_screen(&poly[k+1], &c);
-        raster_tri(&a, &b, &c);
+        prim_push(0, &a, &b, &c);
     }
 }
 static void emit_line(const struct Vtx* v0, const struct Vtx* v1) {
@@ -784,7 +938,7 @@ static void emit_line(const struct Vtx* v0, const struct Vtx* v1) {
     Pv a, b;
     to_screen(&cva, &a);
     to_screen(&cvb, &b);
-    raster_line(&a, &b);
+    prim_push(1, &a, &b, NULL);
 }
 static void emit_point(const struct Vtx* v0) {
     ClipV cv;
@@ -792,7 +946,7 @@ static void emit_point(const struct Vtx* v0) {
     if (cv.w <= 0.0f) return;
     Pv p;
     to_screen(&cv, &p);
-    raster_point(&p);
+    prim_push(2, &p, NULL, NULL);
 }
 
 SP_API void sp_end(void) {
