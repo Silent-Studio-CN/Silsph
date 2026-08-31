@@ -8,7 +8,7 @@ $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $here
 
 Write-Host "== 1/2 编译 silsph_soft.dll =="
-& $gcc -O2 -std=c11 -Wall -Wextra -DSP_BUILD_DLL -shared -o silsph_soft.dll silsph_soft.c silsph_res.c -ladvapi32 "-Wl,--out-implib,silsph_soft.dll.a"
+& $gcc -O2 -std=c11 -Wall -Wextra -DSP_BUILD_DLL -shared -o silsph_soft.dll silsph_soft.c silsph_res.c silsph_png.c -ladvapi32 "-Wl,--out-implib,silsph_soft.dll.a"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "== 2/2 编译 demo_soft.exe =="
@@ -22,6 +22,7 @@ Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o pick_test.exe pick_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o gizmo_test.exe gizmo_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o regress.exe regress.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o png_test.exe png_test.c -L. -lsilsph_soft
 # Rust FFI demo（需 rustc；LoadLibrary 动态加载，无需链接库）
 if (Get-Command rustc -ErrorAction SilentlyContinue) {
     & rustc -O sp_rust_demo.rs -o sp_rust_demo.exe

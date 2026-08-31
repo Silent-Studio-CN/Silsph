@@ -33,6 +33,8 @@ SP_RES_API void     sp_free_mesh(sp_mesh* m);
 
 /* BMP 纹理：24/32bpp BI_RGB（bottom-up/top-down）→ 纹理 ID（sp_gen_texture），失败返回 0 */
 SP_RES_API int      sp_load_texture_bmp(const char* path);
+/* PNG 纹理：8-bit / 灰度/RGB/灰度+alpha/RGBA / 无交织（手写 inflate，零依赖） */
+SP_RES_API int      sp_load_texture_png(const char* path);
 
 #ifdef __cplusplus
 }

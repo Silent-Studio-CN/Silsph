@@ -102,6 +102,9 @@ static void init_checker_texture(void) {
     free(px);
 }
 
+static void draw_cube_outline(void);
+static void draw_gizmo(void);
+
 /* 场景：Qraft 主题立方体(棋盘格纹理) + 16x16 网格 + 轨道相机（与 GL demo 同参数）
    angle 递增 → 立方体自转(绕Y + 绕X摆动) + 相机绕圈（"元素转圈"） */
 static void draw_scene(int W, int H, float angle) {
