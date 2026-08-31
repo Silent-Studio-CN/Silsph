@@ -305,22 +305,17 @@ static void sample_tex(const Pv* a, const Pv* b, const Pv* c,
                        float* r, float* g, float* bb, float* al, const RastState* st);
 
 /* ================= 光栅化：三角形（edge function + 重心坐标 + 透视校正） ================= */
-/* 深度捕获：片元世界坐标 -> 光空间 NDC -> 写 shadow map（深度 LESS） */
-static void shadow_capture_pixel(int x, int y, float wx, float wy, float wz) {
-    const Mat4* m = &S.shadow_mvp;
-    float lx = m->m[0]*wx + m->m[4]*wy + m->m[8]*wz + m->m[12];
-    float ly = m->m[1]*wx + m->m[5]*wy + m->m[9]*wz + m->m[13];
-    float lz = m->m[2]*wx + m->m[6]*wy + m->m[10]*wz + m->m[14];
-    float lw = m->m[3]*wx + m->m[7]*wy + m->m[11]*wz + m->m[15];
-    if (lw <= 0.0f) return;
-    float nx = lx / lw, ny = ly / lw, nz = lz / lw;
-    if (nx < -1.0f || nx > 1.0f || ny < -1.0f || ny > 1.0f || nz < -1.0f || nz > 1.0f) return;
+/* 深度捕获：capture 时 MVP = 光空间矩阵，屏幕像素反推光空间 NDC，深度 LESS 写 shadow map
+   （capture 前应用应设置视口 = shadow 尺寸，保证 1:1 映射） */
+static void shadow_capture_pixel(int x, int y, float zndc) {
+    float nx = ((float)x - S.vp_x) / S.vp_w * 2.0f - 1.0f;
+    float ny = ((float)y - S.vp_y) / S.vp_h * 2.0f - 1.0f;
+    if (nx < -1.0f || nx > 1.0f || ny < -1.0f || ny > 1.0f || zndc < -1.0f || zndc > 1.0f) return;
     int sx = (int)((nx * 0.5f + 0.5f) * S.shadow_size);
     int sy = (int)((ny * 0.5f + 0.5f) * S.shadow_size);
     if (sx < 0 || sx >= S.shadow_size || sy < 0 || sy >= S.shadow_size) return;
     float* d = &S.shadow_map[sy * S.shadow_size + sx];
-    if (nz < *d) *d = nz;
-    (void)x; (void)y;
+    if (zndc < *d) *d = zndc;
 }
 
 /* tile_y0/tile_y1：本线程负责的 y 行区间（多线程分块），串行时 = 视口全高 */
@@ -359,7 +354,7 @@ static void raster_tri(const Pv* a, const Pv* b, const Pv* c, int tile_y0, int t
             float wy = (b0*a->wy/a->wc + b1*b->wy/b->wc + b2*c->wy/c->wc) / iw;
             float wz = (b0*a->wz/a->wc + b1*b->wz/b->wc + b2*c->wz/c->wc) / iw;
             if (S.shadow_capture) {   /* 深度捕获模式：只写光空间深度 */
-                shadow_capture_pixel(x, y, wx, wy, wz);
+                shadow_capture_pixel(x, y, zndc);
                 continue;
             }
             float r, g, bb, al = 1.0f;
@@ -846,6 +841,7 @@ SP_API void sp_shadow_begin(int size) {
 SP_API void sp_shadow_end(void) {
     sp_flush();
     S.shadow_capture = 0;
+    S.shadow_mvp = S.mvp;   /* 自动保存光空间 MVP（主渲染阴影比较用） */
 }
 SP_API void sp_shadow_matrix(const float* m16) {
     memcpy(S.shadow_mvp.m, m16, sizeof(S.shadow_mvp.m));

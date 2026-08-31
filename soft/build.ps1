@@ -23,6 +23,7 @@ Write-Host "== 2/2 编译 demo_soft.exe =="
 & $gcc -O2 -std=c11 -Wall -Wextra -o gizmo_test.exe gizmo_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o regress.exe regress.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o cmd_test.exe cmd_test.c -L. -lsilsph_soft
+& $gcc -O2 -std=c11 -Wall -Wextra -o shadow_test.exe shadow_test.c -L. -lsilsph_soft
 & $gcc -O2 -std=c11 -Wall -Wextra -o png_test.exe png_test.c -L. -lsilsph_soft
 # Rust FFI demo（需 rustc；LoadLibrary 动态加载，无需链接库）
 if (Get-Command rustc -ErrorAction SilentlyContinue) {

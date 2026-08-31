@@ -30,6 +30,10 @@
 - **拾取（picking）**：ID 缓冲（`sp_load_id`/`sp_pick_id`/`SP_ID` 清除标志），深度遮挡语义正确；demo 窗口左键点击拾取物体
 - **Gizmo/选中描边**：三色坐标轴（X红/Y绿/Z蓝+锥头，always-on-top）+ 选中物体亮黄线框描边；demo 点击选中即显示
 - **离屏渲染 + 回归测试**：`sp_save_bmp` 离屏输出；`regress.exe` 黄金图像比对（3 场景差异像素=0，确定性渲染正式化）
+- **多线程光栅化**：Prim 延迟缓冲 + 按 y 分块并行（`sp_flush`/`sp_set_threads`），串行/并行逐位一致（黄金图 0 差异）
+- **统一 API 命令缓冲**：`sp_cmd_begin/end` 后端无关记录+回放（未来 VK 翻译同一命令流）
+- **阴影贴图**：光空间深度捕获（`sp_shadow_begin/end`）+ 片元阴影比较（`sp_shadow_enable`），方向光阴影验证通过
+- **PNG 纹理**：手写 DEFLATE inflate + 5 种滤波 + 4 色型（零依赖）
 - **Python ctypes + Rust FFI 绑定**：`pysilsph.py`（零依赖）+ `sp_rust_demo.rs`（LoadLibrary 动态加载）——渲染结果与 C 黄金图逐字节一致，接 PySide6 编辑器 / Rust ECS 的桥
 - **画质控制**：深度测试 / 背面剔除开关（`sp_depth_test` / `sp_cull_face`）
 - **帧率控制**：限速器实测 60→59.5 FPS、30→29.7 FPS（`sp_sleep_ms`）
