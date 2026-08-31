@@ -43,6 +43,10 @@ SP_API int  sp_create(int width, int height);            // 分配颜色/深度�
 SP_API void sp_destroy(void);
 SP_API void sp_flush(void);                          // 回放已提交图元（多线程光栅化；sp_pixels/save 自动调用）
 SP_API void sp_set_threads(int n);                   // 光栅化线程数：0=自动(默认)，1=串行
+
+/* ---- 命令缓冲（统一 API：后端无关记录，软后端回放；未来 VK/GL 后端翻译同一命令流） ---- */
+SP_API void sp_cmd_begin(void);                      // 开始记录（此后 sp_clear/sp_begin..sp_end 只记录不执行）
+SP_API void sp_cmd_end(void);                        // 结束记录并按顺序回放全部命令
 SP_API void sp_viewport(int x, int y, int w, int h);
 SP_API void sp_clear_color(float r, float g, float b, float a);
 SP_API void sp_clear(unsigned flags);
@@ -79,6 +83,12 @@ SP_API void sp_tex_wrap(int mode);        /* SP_TEX_REPEAT / SP_TEX_CLAMP */
 
 /* ---- 画质控制 ---- */
 SP_API void sp_blend(int enable);      /* alpha 混合（src_alpha / 1-src_alpha，默认关） */
+
+/* ---- 阴影贴图 ---- */
+SP_API void sp_shadow_begin(int size);              /* 开始深度捕获：此后绘制只写光空间深度（串行） */
+SP_API void sp_shadow_end(void);                   /* 结束捕获，生成阴影贴图 */
+SP_API void sp_shadow_matrix(const float* m16);    /* 光空间 MVP（应用自行计算） */
+SP_API void sp_shadow_enable(int on);              /* 主渲染时启用阴影（片元深度比较） */
 
 /* ---- 拾取（ID 缓冲） ---- */
 SP_API void sp_load_id(int id);       /* 当前图元拾取 ID（默认 0=无） */
